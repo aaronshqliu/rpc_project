@@ -100,6 +100,28 @@ void RpcProvider::OnMessage(
             return;
         }
 
+        // 拦截心跳包
+        if (rpc_header.msg_type() == myrpc::PING) {
+            // 构造 Pong 响应头
+            myrpc::RpcHeader pongHeader;
+            pongHeader.set_msg_type(myrpc::PONG);
+
+            std::string pong_str;
+            pongHeader.SerializeToString(&pong_str);
+
+            uint32_t header_size = pong_str.size();
+            uint32_t net_header_size = htonl(header_size);
+
+            std::string send_buf;
+            send_buf.append((const char *)&net_header_size, 4);
+            send_buf.append(pong_str);
+
+            // 直接返回 Pong，终止后续业务分发
+            conn->send(send_buf);
+            return;
+        }
+
+        // 如果是 NORMAL_RPC，则继续走正常的业务分发
         // 解析业务请求参数 (Args)
         uint32_t args_size = rpc_header.args_size();
         if (buffer->readableBytes() < 4 + header_size + args_size) {

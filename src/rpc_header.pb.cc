@@ -35,7 +35,7 @@ static void InitDefaultsscc_info_RpcHeader_rpc_5fheader_2eproto() {
     {{ATOMIC_VAR_INIT(::PROTOBUF_NAMESPACE_ID::internal::SCCInfoBase::kUninitialized), 0, 0, InitDefaultsscc_info_RpcHeader_rpc_5fheader_2eproto}, {}};
 
 static ::PROTOBUF_NAMESPACE_ID::Metadata file_level_metadata_rpc_5fheader_2eproto[1];
-static constexpr ::PROTOBUF_NAMESPACE_ID::EnumDescriptor const** file_level_enum_descriptors_rpc_5fheader_2eproto = nullptr;
+static const ::PROTOBUF_NAMESPACE_ID::EnumDescriptor* file_level_enum_descriptors_rpc_5fheader_2eproto[1];
 static constexpr ::PROTOBUF_NAMESPACE_ID::ServiceDescriptor const** file_level_service_descriptors_rpc_5fheader_2eproto = nullptr;
 
 const ::PROTOBUF_NAMESPACE_ID::uint32 TableStruct_rpc_5fheader_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
@@ -47,6 +47,7 @@ const ::PROTOBUF_NAMESPACE_ID::uint32 TableStruct_rpc_5fheader_2eproto::offsets[
   PROTOBUF_FIELD_OFFSET(::myrpc::RpcHeader, service_name_),
   PROTOBUF_FIELD_OFFSET(::myrpc::RpcHeader, method_name_),
   PROTOBUF_FIELD_OFFSET(::myrpc::RpcHeader, args_size_),
+  PROTOBUF_FIELD_OFFSET(::myrpc::RpcHeader, msg_type_),
 };
 static const ::PROTOBUF_NAMESPACE_ID::internal::MigrationSchema schemas[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
   { 0, -1, sizeof(::myrpc::RpcHeader)},
@@ -57,9 +58,11 @@ static ::PROTOBUF_NAMESPACE_ID::Message const * const file_default_instances[] =
 };
 
 const char descriptor_table_protodef_rpc_5fheader_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) =
-  "\n\020rpc_header.proto\022\005myrpc\"I\n\tRpcHeader\022\024"
+  "\n\020rpc_header.proto\022\005myrpc\"o\n\tRpcHeader\022\024"
   "\n\014service_name\030\001 \001(\t\022\023\n\013method_name\030\002 \001("
-  "\t\022\021\n\targs_size\030\003 \001(\rb\006proto3"
+  "\t\022\021\n\targs_size\030\003 \001(\r\022$\n\010msg_type\030\004 \001(\0162\022"
+  ".myrpc.MessageType*1\n\013MessageType\022\016\n\nNOR"
+  "MAL_RPC\020\000\022\010\n\004PING\020\001\022\010\n\004PONG\020\002b\006proto3"
   ;
 static const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable*const descriptor_table_rpc_5fheader_2eproto_deps[1] = {
 };
@@ -68,7 +71,7 @@ static ::PROTOBUF_NAMESPACE_ID::internal::SCCInfoBase*const descriptor_table_rpc
 };
 static ::PROTOBUF_NAMESPACE_ID::internal::once_flag descriptor_table_rpc_5fheader_2eproto_once;
 const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable descriptor_table_rpc_5fheader_2eproto = {
-  false, false, descriptor_table_protodef_rpc_5fheader_2eproto, "rpc_header.proto", 108,
+  false, false, descriptor_table_protodef_rpc_5fheader_2eproto, "rpc_header.proto", 197,
   &descriptor_table_rpc_5fheader_2eproto_once, descriptor_table_rpc_5fheader_2eproto_sccs, descriptor_table_rpc_5fheader_2eproto_deps, 1, 0,
   schemas, file_default_instances, TableStruct_rpc_5fheader_2eproto::offsets,
   file_level_metadata_rpc_5fheader_2eproto, 1, file_level_enum_descriptors_rpc_5fheader_2eproto, file_level_service_descriptors_rpc_5fheader_2eproto,
@@ -77,6 +80,21 @@ const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable descriptor_table_rpc_5f
 // Force running AddDescriptors() at dynamic initialization time.
 static bool dynamic_init_dummy_rpc_5fheader_2eproto = (static_cast<void>(::PROTOBUF_NAMESPACE_ID::internal::AddDescriptors(&descriptor_table_rpc_5fheader_2eproto)), true);
 namespace myrpc {
+const ::PROTOBUF_NAMESPACE_ID::EnumDescriptor* MessageType_descriptor() {
+  ::PROTOBUF_NAMESPACE_ID::internal::AssignDescriptors(&descriptor_table_rpc_5fheader_2eproto);
+  return file_level_enum_descriptors_rpc_5fheader_2eproto[0];
+}
+bool MessageType_IsValid(int value) {
+  switch (value) {
+    case 0:
+    case 1:
+    case 2:
+      return true;
+    default:
+      return false;
+  }
+}
+
 
 // ===================================================================
 
@@ -105,7 +123,9 @@ RpcHeader::RpcHeader(const RpcHeader& from)
     method_name_.Set(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), from._internal_method_name(),
       GetArena());
   }
-  args_size_ = from.args_size_;
+  ::memcpy(&args_size_, &from.args_size_,
+    static_cast<size_t>(reinterpret_cast<char*>(&msg_type_) -
+    reinterpret_cast<char*>(&args_size_)) + sizeof(msg_type_));
   // @@protoc_insertion_point(copy_constructor:myrpc.RpcHeader)
 }
 
@@ -113,7 +133,9 @@ void RpcHeader::SharedCtor() {
   ::PROTOBUF_NAMESPACE_ID::internal::InitSCC(&scc_info_RpcHeader_rpc_5fheader_2eproto.base);
   service_name_.UnsafeSetDefault(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited());
   method_name_.UnsafeSetDefault(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited());
-  args_size_ = 0u;
+  ::memset(&args_size_, 0, static_cast<size_t>(
+      reinterpret_cast<char*>(&msg_type_) -
+      reinterpret_cast<char*>(&args_size_)) + sizeof(msg_type_));
 }
 
 RpcHeader::~RpcHeader() {
@@ -151,7 +173,9 @@ void RpcHeader::Clear() {
 
   service_name_.ClearToEmpty(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
   method_name_.ClearToEmpty(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
-  args_size_ = 0u;
+  ::memset(&args_size_, 0, static_cast<size_t>(
+      reinterpret_cast<char*>(&msg_type_) -
+      reinterpret_cast<char*>(&args_size_)) + sizeof(msg_type_));
   _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
@@ -186,6 +210,14 @@ const char* RpcHeader::_InternalParse(const char* ptr, ::PROTOBUF_NAMESPACE_ID::
         if (PROTOBUF_PREDICT_TRUE(static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 24)) {
           args_size_ = ::PROTOBUF_NAMESPACE_ID::internal::ReadVarint32(&ptr);
           CHK_(ptr);
+        } else goto handle_unusual;
+        continue;
+      // .myrpc.MessageType msg_type = 4;
+      case 4:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 32)) {
+          ::PROTOBUF_NAMESPACE_ID::uint64 val = ::PROTOBUF_NAMESPACE_ID::internal::ReadVarint64(&ptr);
+          CHK_(ptr);
+          _internal_set_msg_type(static_cast<::myrpc::MessageType>(val));
         } else goto handle_unusual;
         continue;
       default: {
@@ -242,6 +274,13 @@ failure:
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteUInt32ToArray(3, this->_internal_args_size(), target);
   }
 
+  // .myrpc.MessageType msg_type = 4;
+  if (this->msg_type() != 0) {
+    target = stream->EnsureSpace(target);
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteEnumToArray(
+      4, this->_internal_msg_type(), target);
+  }
+
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormat::InternalSerializeUnknownFieldsToArray(
         _internal_metadata_.unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(::PROTOBUF_NAMESPACE_ID::UnknownFieldSet::default_instance), target, stream);
@@ -277,6 +316,12 @@ size_t RpcHeader::ByteSizeLong() const {
     total_size += 1 +
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::UInt32Size(
         this->_internal_args_size());
+  }
+
+  // .myrpc.MessageType msg_type = 4;
+  if (this->msg_type() != 0) {
+    total_size += 1 +
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::EnumSize(this->_internal_msg_type());
   }
 
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
@@ -319,6 +364,9 @@ void RpcHeader::MergeFrom(const RpcHeader& from) {
   if (from.args_size() != 0) {
     _internal_set_args_size(from._internal_args_size());
   }
+  if (from.msg_type() != 0) {
+    _internal_set_msg_type(from._internal_msg_type());
+  }
 }
 
 void RpcHeader::CopyFrom(const ::PROTOBUF_NAMESPACE_ID::Message& from) {
@@ -344,7 +392,12 @@ void RpcHeader::InternalSwap(RpcHeader* other) {
   _internal_metadata_.Swap<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(&other->_internal_metadata_);
   service_name_.Swap(&other->service_name_, &::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
   method_name_.Swap(&other->method_name_, &::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), GetArena());
-  swap(args_size_, other->args_size_);
+  ::PROTOBUF_NAMESPACE_ID::internal::memswap<
+      PROTOBUF_FIELD_OFFSET(RpcHeader, msg_type_)
+      + sizeof(RpcHeader::msg_type_)
+      - PROTOBUF_FIELD_OFFSET(RpcHeader, args_size_)>(
+          reinterpret_cast<char*>(&args_size_),
+          reinterpret_cast<char*>(&other->args_size_));
 }
 
 ::PROTOBUF_NAMESPACE_ID::Metadata RpcHeader::GetMetadata() const {

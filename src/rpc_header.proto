@@ -1,8 +1,15 @@
 syntax = "proto3";
 package myrpc;
 
+enum MessageType {
+    NORMAL_RPC = 0; // 普通的业务请求
+    PING = 1;       // 心跳请求
+    PONG = 2;       // 心跳响应
+}
+
 message RpcHeader {
     string service_name = 1;
     string method_name = 2;
     uint32 args_size = 3;
+    MessageType msg_type = 4;
 }

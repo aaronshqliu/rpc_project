@@ -31,6 +31,7 @@
 #include <google/protobuf/message.h>
 #include <google/protobuf/repeated_field.h>  // IWYU pragma: export
 #include <google/protobuf/extension_set.h>  // IWYU pragma: export
+#include <google/protobuf/generated_enum_reflection.h>
 #include <google/protobuf/unknown_field_set.h>
 // @@protoc_insertion_point(includes)
 #include <google/protobuf/port_def.inc>
@@ -64,6 +65,32 @@ template<> ::myrpc::RpcHeader* Arena::CreateMaybeMessage<::myrpc::RpcHeader>(Are
 PROTOBUF_NAMESPACE_CLOSE
 namespace myrpc {
 
+enum MessageType : int {
+  NORMAL_RPC = 0,
+  PING = 1,
+  PONG = 2,
+  MessageType_INT_MIN_SENTINEL_DO_NOT_USE_ = std::numeric_limits<::PROTOBUF_NAMESPACE_ID::int32>::min(),
+  MessageType_INT_MAX_SENTINEL_DO_NOT_USE_ = std::numeric_limits<::PROTOBUF_NAMESPACE_ID::int32>::max()
+};
+bool MessageType_IsValid(int value);
+constexpr MessageType MessageType_MIN = NORMAL_RPC;
+constexpr MessageType MessageType_MAX = PONG;
+constexpr int MessageType_ARRAYSIZE = MessageType_MAX + 1;
+
+const ::PROTOBUF_NAMESPACE_ID::EnumDescriptor* MessageType_descriptor();
+template<typename T>
+inline const std::string& MessageType_Name(T enum_t_value) {
+  static_assert(::std::is_same<T, MessageType>::value ||
+    ::std::is_integral<T>::value,
+    "Incorrect type passed to function MessageType_Name.");
+  return ::PROTOBUF_NAMESPACE_ID::internal::NameOfEnum(
+    MessageType_descriptor(), enum_t_value);
+}
+inline bool MessageType_Parse(
+    const std::string& name, MessageType* value) {
+  return ::PROTOBUF_NAMESPACE_ID::internal::ParseNamedEnum<MessageType>(
+    MessageType_descriptor(), name, value);
+}
 // ===================================================================
 
 class RpcHeader PROTOBUF_FINAL :
@@ -182,6 +209,7 @@ class RpcHeader PROTOBUF_FINAL :
     kServiceNameFieldNumber = 1,
     kMethodNameFieldNumber = 2,
     kArgsSizeFieldNumber = 3,
+    kMsgTypeFieldNumber = 4,
   };
   // string service_name = 1;
   void clear_service_name();
@@ -242,6 +270,15 @@ class RpcHeader PROTOBUF_FINAL :
   void _internal_set_args_size(::PROTOBUF_NAMESPACE_ID::uint32 value);
   public:
 
+  // .myrpc.MessageType msg_type = 4;
+  void clear_msg_type();
+  ::myrpc::MessageType msg_type() const;
+  void set_msg_type(::myrpc::MessageType value);
+  private:
+  ::myrpc::MessageType _internal_msg_type() const;
+  void _internal_set_msg_type(::myrpc::MessageType value);
+  public:
+
   // @@protoc_insertion_point(class_scope:myrpc.RpcHeader)
  private:
   class _Internal;
@@ -252,6 +289,7 @@ class RpcHeader PROTOBUF_FINAL :
   ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr service_name_;
   ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr method_name_;
   ::PROTOBUF_NAMESPACE_ID::uint32 args_size_;
+  int msg_type_;
   mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   friend struct ::TableStruct_rpc_5fheader_2eproto;
 };
@@ -448,6 +486,26 @@ inline void RpcHeader::set_args_size(::PROTOBUF_NAMESPACE_ID::uint32 value) {
   // @@protoc_insertion_point(field_set:myrpc.RpcHeader.args_size)
 }
 
+// .myrpc.MessageType msg_type = 4;
+inline void RpcHeader::clear_msg_type() {
+  msg_type_ = 0;
+}
+inline ::myrpc::MessageType RpcHeader::_internal_msg_type() const {
+  return static_cast< ::myrpc::MessageType >(msg_type_);
+}
+inline ::myrpc::MessageType RpcHeader::msg_type() const {
+  // @@protoc_insertion_point(field_get:myrpc.RpcHeader.msg_type)
+  return _internal_msg_type();
+}
+inline void RpcHeader::_internal_set_msg_type(::myrpc::MessageType value) {
+  
+  msg_type_ = value;
+}
+inline void RpcHeader::set_msg_type(::myrpc::MessageType value) {
+  _internal_set_msg_type(value);
+  // @@protoc_insertion_point(field_set:myrpc.RpcHeader.msg_type)
+}
+
 #ifdef __GNUC__
   #pragma GCC diagnostic pop
 #endif  // __GNUC__
@@ -455,6 +513,16 @@ inline void RpcHeader::set_args_size(::PROTOBUF_NAMESPACE_ID::uint32 value) {
 // @@protoc_insertion_point(namespace_scope)
 
 }  // namespace myrpc
+
+PROTOBUF_NAMESPACE_OPEN
+
+template <> struct is_proto_enum< ::myrpc::MessageType> : ::std::true_type {};
+template <>
+inline const EnumDescriptor* GetEnumDescriptor< ::myrpc::MessageType>() {
+  return ::myrpc::MessageType_descriptor();
+}
+
+PROTOBUF_NAMESPACE_CLOSE
 
 // @@protoc_insertion_point(global_scope)
 

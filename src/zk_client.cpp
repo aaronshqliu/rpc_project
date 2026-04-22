@@ -148,3 +148,12 @@ std::vector<std::string> ZkClient::GetChildren(const char *path, bool watch)
 
     return children;
 }
+
+void ZkClient::Close()
+{
+    if (zk_handle != nullptr) {
+        zookeeper_close(zk_handle); // 这会立刻断开 Session，临时节点瞬间消失
+        zk_handle = nullptr;
+        LOG(INFO) << "ZkClient manually closed, ephemeral nodes deleted.";
+    }
+}

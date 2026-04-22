@@ -1,4 +1,5 @@
 #include "rpc_channel.h"
+#include "connection_pool.h"
 #include "rpc_application.h"
 #include "rpc_header.pb.h"
 #include "zk_client.h"
@@ -45,6 +46,7 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
     rpcHeader.set_service_name(service_name);
     rpcHeader.set_method_name(method_name);
     rpcHeader.set_args_size(args_str.size());
+    rpcHeader.set_msg_type(myrpc::NORMAL_RPC);
 
     std::string header_str;
     if (!rpcHeader.SerializeToString(&header_str)) {
@@ -76,50 +78,28 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
 
         std::string current_host_str = host.ip + ":" + std::to_string(host.port);
 
-        client_fd = socket(AF_INET, SOCK_STREAM, 0);
+        // 4.2 从连接池获取连接
+        client_fd = ConnectionPool::GetInstance().GetConnection(host.ip, host.port);
         if (client_fd == -1) {
-            controller->SetFailed("Create socket failed!");
-            return;
-        }
-
-        // 4.2 增加 Socket 超时控制 (收发各 5 秒超时)
-        struct timeval tv;
-        tv.tv_sec = 5;
-        tv.tv_usec = 0;
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
-        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
-
-        struct sockaddr_in server_addr;
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(host.port);
-        server_addr.sin_addr.s_addr = inet_addr(host.ip.c_str());
-
-        // 4.3 尝试连接
-        if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
-            close(client_fd);
-            client_fd = -1;
-
-            // 【精准剔除】：只从缓存列表中删掉这个坏掉的 IP
+            // 连接失败的处理逻辑：剔除坏节点
             {
                 std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
                 auto it = host_cache.find(zk_path);
                 if (it != host_cache.end()) {
                     auto &hosts = it->second;
                     hosts.erase(std::remove(hosts.begin(), hosts.end(), current_host_str), hosts.end());
-                    if (hosts.empty()) {
-                        host_cache.erase(it); // 列表空了才把整个 path 删掉，迫使下次请求 ZK
-                    }
+                    if (hosts.empty())
+                        host_cache.erase(it);
                 }
             }
-
-            LOG(WARNING) << "Connect to " << current_host_str << " failed, evicting from cache and retrying...";
-            continue; // 继续下一次循环，QueryZkForHost 会分配另一个正常节点
+            continue; // 重试
         }
 
         // 5. 连接成功，跳出重试循环，进入数据收发阶段
         // 注意：数据发送失败不自动重试，防止非幂等操作重复执行
         if (send(client_fd, send_buf.c_str(), send_buf.size(), 0) == -1) {
-            close(client_fd);
+            // 发送失败：说明连接已损坏，必须销毁，不能放回连接池！
+            ConnectionPool::GetInstance().CloseConnection(client_fd);
             controller->SetFailed("Send RPC request failed!");
             return;
         }
@@ -128,8 +108,8 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         uint32_t recv_size = 0;
         // 先精准读取前 4 个字节，获取响应总长度
         if (recv_exact(client_fd, (char *)&recv_size, 4) != 4) {
-            close(client_fd);
-            controller->SetFailed("Recv response header failed!");
+            ConnectionPool::GetInstance().CloseConnection(client_fd);
+            controller->SetFailed("Recv response header timeout or failed!");
             return;
         }
 
@@ -138,19 +118,24 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         recv_buf.resize(recv_size);
 
         if (recv_exact(client_fd, &recv_buf[0], recv_size) == recv_size) {
-            // 反序列化，将结果填入给业务层的 response 对象中
             if (!response->ParseFromArray(&recv_buf[0], recv_size)) {
                 controller->SetFailed("Parse response error!");
+                ConnectionPool::GetInstance().CloseConnection(client_fd); // 数据包错乱，安全起见销毁连接
             } else {
-                rpc_success = true; // RPC 调用彻底成功
+                rpc_success = true;
+                // RPC 调用彻底成功，将健康的连接放回池中复用！
+                ConnectionPool::GetInstance().ReleaseConnection(host.ip, host.port, client_fd);
             }
         } else {
+            ConnectionPool::GetInstance().CloseConnection(client_fd);
             controller->SetFailed("Recv response data timeout or incomplete!");
         }
 
-        // 释放短连接资源
-        close(client_fd);
-        break;
+        break; // 建连成功并执行完收发，跳出重试循环
+
+        if (!rpc_success && !controller->Failed()) {
+            controller->SetFailed("RPC Call failed: Exhausted retries for " + service_name);
+        }
     }
 
     // 检查重试是否耗尽
@@ -191,8 +176,6 @@ MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &servic
         std::shared_lock<std::shared_mutex> read_lock(cache_mutex);
         auto it = host_cache.find(path);
         if (it != host_cache.end() && !it->second.empty()) {
-            // std::cout << "[CACHE HIT] 命中缓存: " << path << " -> " << it->second.ip << ":" << it->second.port <<
-            // \n';
             available_hosts = it->second;
         }
     }

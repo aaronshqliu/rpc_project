@@ -21,6 +21,9 @@ public:
     // 启动连接 ZkServer，增加超时检测
     void Start(int timeout_ms = 5000);
 
+    // 用于主动断开连接，快速删除临时节点
+    void Close();
+
     // 在 ZkServer 上根据指定的 path 创建 znode 节点
     // state = 0 默认是持久性节点, state = ZOO_EPHEMERAL 是临时性节点
     void Create(const char *path, const char *data, int datalen, int state = 0);

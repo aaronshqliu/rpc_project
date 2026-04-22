@@ -13,6 +13,7 @@ public:
     ~RpcProvider();
     void NotifyService(google::protobuf::Service *service);
     void Run();
+    muduo::net::EventLoop* GetEventLoop() { return &event_loop; }
 
 private:
     void OnConnection(const muduo::net::TcpConnectionPtr &conn);

@@ -68,8 +68,8 @@ int main(int argc, char **argv)
 {
     RpcApplication::GetInstance().Init(argc, argv);
 
-    const int thread_counts = 50;
-    const int requests_per_thread = 200;
+    const int thread_counts = 500;
+    const int requests_per_thread = 1000;
     std::vector<std::thread> threads;
     std::atomic<int> success_counts(0);
     std::atomic<int> failure_counts(0);
@@ -95,11 +95,11 @@ int main(int argc, char **argv)
     long long actual_completed_requests = success_counts.load() + failure_counts.load();
 
     LOG(INFO) << "================ RPC 压测报告 ================";
-    LOG(INFO) << "预期总请求数 (Expected) : " << total_expected_requests;
-    LOG(INFO) << "实际完成数 (Completed)  : " << actual_completed_requests;
-    LOG(INFO) << "成功请求数 (Success)   : " << success_counts.load();
-    LOG(INFO) << "失败请求数 (Failed)    : " << failure_counts.load();
-    LOG(INFO) << "总计耗时 (Time taken)  : " << duration_seconds << " seconds";
+    LOG(INFO) << "预期总请求数 (Expected)  : " << total_expected_requests;
+    LOG(INFO) << "实际完成数 (Completed)   : " << actual_completed_requests;
+    LOG(INFO) << "成功请求数 (Success)    : " << success_counts.load();
+    LOG(INFO) << "失败请求数 (Failed)     : " << failure_counts.load();
+    LOG(INFO) << "总计耗时 (Time taken)   : " << duration_seconds << " seconds";
 
     if (duration_seconds > 0.000001) {
         double total_qps = actual_completed_requests / duration_seconds;
