@@ -24,12 +24,18 @@ private:
                       google::protobuf::Message *request,
                       google::protobuf::Message *response); // 服务分发后的回调
 
-    struct ServiceInfo {
-        google::protobuf::Service *service;                                                     // 服务对象
-        std::unordered_map<std::string, const google::protobuf::MethodDescriptor *> method_map; // 方法描述符映射
-    };
     muduo::net::EventLoop event_loop;
-    std::unordered_map<std::string, ServiceInfo> service_map; // 存储注册成功的服务及其详细信息
+
+    // ServiceInfo结构体用来存储某一个具体服务的所有信息。在 Protobuf 的概念里，一个 Service（服务）往往包含多个 Method（方法）。
+    struct ServiceInfo {
+        // 这个指针就是指向 new 出来的那个具体的业务对象。当框架需要执行业务逻辑时，最终就是通过这个指针去调用的。
+        google::protobuf::Service *service; 
+        // Key 是方法名（比如 "Login"），Value 是指向该方法描述符 (MethodDescriptor) 的指针。
+        std::unordered_map<std::string, const google::protobuf::MethodDescriptor *> method_map;
+    };
+
+    // 整个 RPC Provider 的总路由表。Key 是服务名（比如 "UserServiceRpc"），Value 是对应的服务档案，也就是上面的 ServiceInfo。
+    std::unordered_map<std::string, ServiceInfo> service_map;
 };
 
 #endif // RPC_PROVIDER_H

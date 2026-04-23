@@ -25,7 +25,7 @@ void SigTermHandler(int sig)
         LOG(INFO) << "ZK session closed. Waiting 3 seconds for clients to flush cache and in-flight requests to complete...";
 
         // 第二步：保持 muduo 运行，缓冲 3 秒
-        // 这 3 秒内，muduo 会继续把队列里那 200 多个还没处理完的请求处理掉，并返回给客户端
+        // 这 3 秒内，muduo 会继续把队列里还没处理完的请求处理掉，并返回给客户端
         std::this_thread::sleep_for(std::chrono::seconds(3));
 
         // 第三步：平滑停止网络服务，进程退出
@@ -95,7 +95,8 @@ int main(int argc, char **argv)
     RpcProvider provider;
     g_provider = &provider; // 赋值给全局指针
 
-    provider.NotifyService(new UserService());
+    provider.NotifyService(new UserService()); // 登录注册服务
+    // 以后可以继续拓展服务：provider.NotifyService(new FriendService());
     provider.Run();
 
     return 0;

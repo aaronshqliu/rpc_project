@@ -19,13 +19,6 @@ void global_watcher(zhandle_t *zh, int type, int state, const char *path, void *
     }
 }
 
-void ZkClient::NotifyConnected()
-{
-    std::lock_guard<std::mutex> lock(mtx);
-    connected = true;
-    cv.notify_all(); // 唤醒阻塞在 condition_variable 上的线程
-}
-
 ZkClient::ZkClient() : zk_handle(nullptr), connected(false) {}
 
 ZkClient::~ZkClient()
@@ -33,6 +26,13 @@ ZkClient::~ZkClient()
     if (zk_handle != nullptr) {
         zookeeper_close(zk_handle); // 关闭句柄，释放底层的网络连接资源
     }
+}
+
+void ZkClient::NotifyConnected()
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    connected = true;
+    cv.notify_all(); // 唤醒阻塞在 condition_variable 上的线程
 }
 
 void ZkClient::SetNotifyHandler(ZkNotifyHandler handler)
@@ -84,14 +84,6 @@ void ZkClient::Start(int timeout_ms)
 void ZkClient::Create(const char *path, const char *data, int datalen, int state)
 {
     std::string path_str(path);
-
-    // 如果是临时节点，且传入了有效的 data (ip:port)
-    // 将路径改造为 /ServiceName/MethodName/ip:port
-    if (state == ZOO_EPHEMERAL && data != nullptr && datalen > 0) {
-        std::string data_str(data, datalen);
-        path_str = path_str + "/" + data_str;
-    }
-
     size_t pos = 1; // 跳过第一个 '/'
 
     // 1. 递归检查并创建父节点（持久节点）
@@ -101,7 +93,7 @@ void ZkClient::Create(const char *path, const char *data, int datalen, int state
         if (res == ZNONODE) {
             char buf[128];
             // 父节点强制设为持久节点 (state = 0)
-            int rc = zoo_create(zk_handle, parent_path.c_str(), nullptr, 0, &ZOO_OPEN_ACL_UNSAFE, 0, buf, sizeof(buf));
+            int rc = zoo_create(zk_handle, parent_path.c_str(), nullptr, -1, &ZOO_OPEN_ACL_UNSAFE, 0, buf, sizeof(buf));
             if (rc != ZOK && rc != ZNODEEXISTS) {
                 LOG(ERROR) << "Create parent node failed: " << parent_path;
                 return;
@@ -112,9 +104,14 @@ void ZkClient::Create(const char *path, const char *data, int datalen, int state
 
     // 2. 创建最终的目标节点
     int res = zoo_exists(zk_handle, path_str.c_str(), 0, nullptr);
+    if (res == ZOK) {
+        // 如果节点已经存在，可能是上次宕机残留的幽灵节点，先强制删除
+        LOG(WARNING) << "Znode already exists, possibly leftover from previous crash. Deleting: " << path_str;
+        zoo_delete(zk_handle, path_str.c_str(), -1); // -1 表示忽略版本号强制删除
+        res = ZNONODE;                               // 重置状态，让它继续往下走去创建
+    }
     if (res == ZNONODE) {
-        char path_buffer[256]; // 稍微开大一点，防止路径过长
-        // 注意：这里的节点数据依然存了一份 data，虽然节点名字本身就是 data 了，但存一份也没坏处
+        char path_buffer[256];
         int rc = zoo_create(
             zk_handle, path_str.c_str(), data, datalen, &ZOO_OPEN_ACL_UNSAFE, state, path_buffer, sizeof(path_buffer));
         if (rc != ZOK) {

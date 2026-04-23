@@ -48,6 +48,7 @@ void RpcProvider::Run()
     muduo::net::InetAddress address(ip, port);
     muduo::net::TcpServer server(&event_loop, address, "RpcProvider");
 
+    // 绑定连接回调和消息回调，分离网络连接业务和消息处理业务
     server.setConnectionCallback(std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
     server.setMessageCallback(
         std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
@@ -55,16 +56,18 @@ void RpcProvider::Run()
 
     // 将注册的服务发布到 ZooKeeper 上，供客户端发现
     ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
-    for (auto &sp : service_map) {
-        for (auto &mp : sp.second.method_map) {
-            // /Service_Name/Method_Name (临时节点)
-            std::string method_path = "/" + sp.first + "/" + mp.first;
+    for (auto &[service_name, service_info] : service_map) {
+        for (auto &[method_name, method_desc] : service_info.method_map) {
+            // /Service_Name/Method_Name 
+            std::string method_path = "/" + service_name + "/" + method_name;
+
             // 节点存储的数据是当前 provider 的 ip:port
             std::string method_path_data = ip + ":" + std::to_string(port);
             std::string instance_path = method_path + "/" + method_path_data;
+
             // ZOO_EPHEMERAL 临时节点，断开连接自动删除
-            zk.Create(instance_path.c_str(), nullptr, 0, ZOO_EPHEMERAL);
-            LOG(INFO) << "Register RPC service: " << method_path.c_str() << " success!";
+            zk.Create(instance_path.c_str(), method_path_data.c_str(), method_path_data.size(), ZOO_EPHEMERAL);
+            LOG(INFO) << "Register RPC service: " << instance_path.c_str() << " success!";
         }
     }
     server.start();
@@ -109,16 +112,15 @@ void RpcProvider::OnMessage(
             std::string pong_str;
             pongHeader.SerializeToString(&pong_str);
 
-            uint32_t header_size = pong_str.size();
-            uint32_t net_header_size = htonl(header_size);
+            uint32_t net_header_size = htonl(pong_str.size());
 
             std::string send_buf;
             send_buf.append((const char *)&net_header_size, 4);
             send_buf.append(pong_str);
-
-            // 直接返回 Pong，终止后续业务分发
             conn->send(send_buf);
-            return;
+
+            buffer->retrieve(4 + header_size);
+            continue;
         }
 
         // 如果是 NORMAL_RPC，则继续走正常的业务分发

@@ -20,9 +20,14 @@ private:
         std::string ip;
         uint16_t port;
     };
-    std::unordered_map<std::string, std::vector<std::string>> host_cache; // 缓存的是该方法下的【所有可用节点列表】
+
+    // 将主机列表和独立的轮询计数器绑定在一起
+    struct ServiceNodeList {
+        std::vector<std::string> hosts;
+        std::atomic<uint32_t> next_idx{0}; // 专属这个服务节点的计数器，从 0 开始
+    };
+    std::unordered_map<std::string, std::shared_ptr<ServiceNodeList>> host_cache; // 缓存的是该方法下的【所有可用节点列表】
     std::shared_mutex cache_mutex;
-    std::atomic<uint32_t> request_count {0};
 
     ssize_t recv_exact(int fd, char *buffer, size_t length);
     ServiceHost QueryZkForHost(const std::string &service_name, const std::string &method_name);

@@ -84,36 +84,46 @@ bool ConnectionPool::Ping(int fd)
 int ConnectionPool::GetConnection(const std::string &ip, uint16_t port)
 {
     std::string key = ip + ":" + std::to_string(port);
-    int fd = -1;
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        while (pool_.find(key) != pool_.end() && !pool_[key].empty()) {
-            auto item = pool_[key].front();
-            pool_[key].pop();
+    while (true) {
+        int fd = -1;
+        std::chrono::steady_clock::time_point last_active;
 
-            // 借出检查 (Ping on Checkout)
-            auto now = std::chrono::steady_clock::now();
-            auto idle_duration = std::chrono::duration_cast<std::chrono::seconds>(now - item.last_active_time).count();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pool_.find(key) != pool_.end() && !pool_[key].empty()) {
+                auto item = pool_[key].front();
+                pool_[key].pop();
 
-            if (idle_duration > 10) { // 空闲超过 10 秒，需要发送 Ping 探测
-                if (Ping(item.fd)) {
-                    // 心跳存活，更新活跃时间并返回
-                    return item.fd;
-                } else {
-                    // 心跳失败，说明服务端已断开或网络异常，直接销毁该死连接，继续检查下一个
-                    close(item.fd);
-                    continue;
-                }
-            } else {
-                // 10 秒内刚用过，大概率是健康的，直接返回
-                return item.fd;
+                fd = item.fd;
+                last_active = item.last_active_time;
             }
         }
-    }
 
-    // 缓存为空或全是死连接，新建连接
-    return CreateNewConnection(ip, port);
+        // 如果池子里面没拿到，直接跳出循环去新建
+        if (fd == -1) {
+            return CreateNewConnection(ip, port);
+        }
+
+        // 拿到了，在【无锁】状态下进行空闲判断和 Ping 测试
+        auto now = std::chrono::steady_clock::now();
+        auto idle_duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_active).count();
+
+        if (idle_duration > 10) {
+            if (Ping(fd)) {
+                // 心跳存活，返回可用 fd
+                return fd;
+            } else {
+                // 心跳失败，关闭死连接。
+                // 此时还在 while(true) 循环内，会自动进入下一次循环，去池子里拿下一个
+                close(fd);
+                continue;
+            }
+        } else {
+            // 10 秒内刚用过，大概率是健康的，直接返回
+            return fd;
+        }
+    }
 }
 
 void ConnectionPool::ReleaseConnection(const std::string &ip, uint16_t port, int fd)
@@ -130,7 +140,7 @@ void ConnectionPool::ReleaseConnection(const std::string &ip, uint16_t port, int
     item.last_active_time = std::chrono::steady_clock::now();
 
     std::lock_guard<std::mutex> lock(mutex_);
-    pool_[key].push(item); // 放回池中
+    pool_[key].emplace(item); // 放回池中
 }
 
 void ConnectionPool::CloseConnection(int fd)
