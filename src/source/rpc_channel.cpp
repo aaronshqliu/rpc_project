@@ -60,17 +60,22 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         // 4.2 从连接池获取连接
         client_fd = ConnectionPool::GetInstance().GetConnection(host.ip, host.port);
         if (client_fd == -1) {
-            // 连接失败的处理逻辑：剔除坏节点
+            // 建连失败：服务器网络不通或宕机，必须剔除坏节点。
+            LOG(ERROR) << "Connect failed, removing invalid host: " << host.ip << ":" << host.port;
             std::string zk_path = "/" + service_name + "/" + method_name;
             RemoveInvalidHost(zk_path, host);
-            continue; // 重试
+            continue; // 重试下一台
+        } else if (client_fd == -2) {
+            // 连接池已满：服务器健康，只是太忙了，不要剔除它。
+            LOG(WARNING) << "Host is too busy (connection pool full): " << host.ip << ":" << host.port;
+            continue; // 直接重试，轮询去尝试下一台机器
         }
 
         // 5. 连接成功，跳出重试循环，进入数据收发阶段
         // 注意：数据发送失败不自动重试，防止非幂等操作重复执行
         if (send(client_fd, send_buf.c_str(), send_buf.size(), 0) == -1) {
-            // 发送失败：说明连接已损坏，必须销毁，不能放回连接池！
-            ConnectionPool::GetInstance().CloseConnection(client_fd);
+            // 发送失败：说明连接已损坏，必须销毁，不能放回连接池。
+            ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
             controller->SetFailed("Send RPC request failed!");
             return;
         }
@@ -79,14 +84,14 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         uint32_t recv_size = 0;
         // 先精准读取前 4 个字节，获取响应总长度
         if (net_utils::recv_exact(client_fd, (char *)&recv_size, 4) != 4) {
-            ConnectionPool::GetInstance().CloseConnection(client_fd);
+            ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
             controller->SetFailed("Recv response header timeout or failed!");
             return;
         }
 
         recv_size = ntohl(recv_size);       // 转回主机字节序
         if (recv_size > 64 * 1024 * 1024) { // 限制 RPC 响应最大为 64MB
-            ConnectionPool::GetInstance().CloseConnection(client_fd);
+            ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
             controller->SetFailed("Parse response header error: Response size too large!");
             return;
         }
@@ -96,14 +101,14 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         if (net_utils::recv_exact(client_fd, &recv_buf[0], recv_size) == recv_size) {
             if (!response->ParseFromArray(&recv_buf[0], recv_size)) {
                 controller->SetFailed("Parse response error!");
-                ConnectionPool::GetInstance().CloseConnection(client_fd); // 数据包错乱，安全起见销毁连接
+                ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd); // 数据包错乱，安全起见销毁连接
             } else {
                 rpc_success = true;
                 // RPC 调用彻底成功，将健康的连接放回池中复用！
                 ConnectionPool::GetInstance().ReleaseConnection(host.ip, host.port, client_fd);
             }
         } else {
-            ConnectionPool::GetInstance().CloseConnection(client_fd);
+            ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
             controller->SetFailed("Recv response data timeout or incomplete!");
             return;
         }
@@ -120,21 +125,19 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
 MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &service_name, const std::string &method_name)
 {
     std::string path = "/" + service_name + "/" + method_name;
-    std::shared_ptr<ServiceNodeList> node_list = nullptr;
-
     // 1. 尝试从缓存获取 (加读锁，允许多线程并发读)
     {
         std::shared_lock<std::shared_mutex> read_lock(cache_mutex);
         auto it = host_cache.find(path);
         if (it != host_cache.end() && it->second && !it->second->hosts.empty()) {
-            node_list = it->second;
+            return GetHostByRoundRobin(it->second);
         }
     }
 
     // 2. 缓存未命中，去 ZK 查询
+    std::shared_ptr<ServiceNodeList> node_list = nullptr;
     {
         std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
-
         // 防止多个线程同时发现缓存为空，阻塞在锁外，拿到锁后重复查询ZK
         auto it = host_cache.find(path);
         if (it != host_cache.end() && it->second && !it->second->hosts.empty()) {
@@ -237,7 +240,6 @@ void MyRpcChannel::BackgroundRefreshCache(const std::string &path)
     std::vector<std::string> new_host_strs;
 
     // 1. 重新向 ZK 拉取最新的节点列表（注意 watch 参数依然为 true，为了监听下一次变化）
-    // 检查查询是否成功
     if (!zk.GetChildren(path.c_str(), new_host_strs, true)) {
         // 如果 ZK 查询报错（网络问题等），不清空缓存，而是保留旧缓存继续使用，这叫“容错降级”。
         LOG(WARNING) << "ZK update failed, keeping STALE cache for path: " << path;
@@ -247,29 +249,28 @@ void MyRpcChannel::BackgroundRefreshCache(const std::string &path)
     // 2. 解析新的节点数据
     std::vector<ServiceHost> parsed_hosts = ParseHostStrings(new_host_strs);
 
-    // 3. 执行写时复制 (COW) 替换缓存
-    std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
-    auto it = host_cache.find(path);
-
+    // 3. 如果全宕机了，只能清空，根本不需要分配新内存，直接进锁清理即可
     if (parsed_hosts.empty()) {
-        // 如果全宕机了，只能清空
-        if (it != host_cache.end()) {
+        std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
+        if (auto it = host_cache.find(path); it != host_cache.end()) {
             host_cache.erase(it);
         }
         LOG(WARNING) << "All nodes down for path: " << path << ". Cache cleared.";
-    } else {
-        // 创建新列表，平滑替换旧列表
-        auto new_list = std::make_shared<ServiceNodeList>();
-        new_list->hosts = std::move(parsed_hosts);
+        return;
+    }
 
+    // 4. 写时复制，创建新列表，平滑替换旧列表
+    auto new_list = std::make_shared<ServiceNodeList>();
+    new_list->hosts = std::move(parsed_hosts);
+    {
+        std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
         // 继承旧的轮询计数器，保证负载均衡不断档
-        if (it != host_cache.end() && it->second) {
+        if (auto it = host_cache.find(path); it != host_cache.end() && it->second) {
             new_list->next_idx.store(it->second->next_idx.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
-
-        host_cache[path] = new_list; // 原子替换指针
-        LOG(INFO) << "Background refresh success for path: " << path << ", new node count: " << new_list->hosts.size();
+        host_cache[path] = new_list;
     }
+    LOG(INFO) << "Background refresh success for path: " << path << ", new node count: " << new_list->hosts.size();
 }
 
 std::vector<MyRpcChannel::ServiceHost> MyRpcChannel::ParseHostStrings(const std::vector<std::string> &host_strs)

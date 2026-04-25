@@ -45,8 +45,7 @@ private:
         std::atomic<uint32_t> next_idx {0}; // 专属这个服务节点的计数器，从 0 开始
     };
 
-    std::unordered_map<std::string, std::shared_ptr<ServiceNodeList>>
-        host_cache; // 缓存的是该方法下的【所有可用节点列表】
+    std::unordered_map<std::string, std::shared_ptr<ServiceNodeList>> host_cache; // 缓存的是该方法下的【所有可用节点列表】
     std::shared_mutex cache_mutex;
 
     ServiceHost QueryZkForHost(const std::string &service_name, const std::string &method_name);

@@ -10,7 +10,7 @@
 #include <shared_mutex>
 #include <vector>
 
-// 定义观察者回调：当监听的节点发生变化时，通知上层（如 MyRpcChannel）
+// 定义观察者回调：当监听的节点发生变化时，通知上层 MyRpcChannel
 using ZkNotifyHandler = std::function<void(int type, const std::string &path)>;
 // 用于恢复状态的回调
 using SessionRecoveryHandler = std::function<void()>;
