@@ -9,8 +9,10 @@
 #include <glog/logging.h>
 
 void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
-    ::google::protobuf::RpcController *controller, const ::google::protobuf::Message *request,
-    ::google::protobuf::Message *response, ::google::protobuf::Closure *done)
+                              ::google::protobuf::RpcController *controller,
+                              const ::google::protobuf::Message *request,
+                              ::google::protobuf::Message *response,
+                              ::google::protobuf::Closure *done)
 {
     std::string service_name = method->service()->name();
     std::string method_name = method->name();
@@ -209,7 +211,7 @@ void MyRpcChannel::RemoveInvalidHost(const std::string &path, const ServiceHost 
     if (it != host_cache.end() && it->second) {
         auto old_list = it->second;
 
-        // 【写时复制核心】：1. 创建一个全新的结构体
+        // 1. 创建一个全新的结构体
         auto new_list = std::make_shared<ServiceNodeList>();
 
         // 2. 将健康的节点全部拷贝过去，跳过那个失效的节点

@@ -12,9 +12,11 @@ public:
     MyRpcChannel() {}
     virtual ~MyRpcChannel() {}
 
-    void CallMethod(const ::google::protobuf::MethodDescriptor *method, ::google::protobuf::RpcController *controller,
-        const ::google::protobuf::Message *request, ::google::protobuf::Message *response,
-        ::google::protobuf::Closure *done) override;
+    void CallMethod(const ::google::protobuf::MethodDescriptor *method,
+                    ::google::protobuf::RpcController *controller,
+                    const ::google::protobuf::Message *request,
+                    ::google::protobuf::Message *response,
+                    ::google::protobuf::Closure *done) override;
     
     void PreFetchService(const std::string &service_name, const std::string &method_name);
 

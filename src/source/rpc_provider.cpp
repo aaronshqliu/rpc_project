@@ -93,8 +93,9 @@ void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
     }
 }
 
-void RpcProvider::OnMessage(
-    const muduo::net::TcpConnectionPtr &conn, muduo::net::Buffer *buffer, muduo::Timestamp receive_time)
+void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn,
+                            muduo::net::Buffer *buffer,
+                            muduo::Timestamp receive_time)
 {
     // 循环处理缓冲区，解决粘包问题。约定了协议 [4 字节的 Header 长度][RpcHeader（序列化的二进制）][Method Args（序列化的二进制）]
     while (buffer->readableBytes() >= 4) {
@@ -180,8 +181,9 @@ void RpcProvider::OnMessage(
 }
 
 // 将 RPC 响应对象序列化并发送回客户端
-void RpcProvider::SendResponse(
-    const muduo::net::TcpConnectionPtr &conn, google::protobuf::Message *request, google::protobuf::Message *response)
+void RpcProvider::SendResponse(const muduo::net::TcpConnectionPtr &conn,
+                               google::protobuf::Message *request,
+                               google::protobuf::Message *response)
 {
     std::string response_str;
 

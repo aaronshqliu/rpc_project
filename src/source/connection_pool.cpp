@@ -48,18 +48,38 @@ ConnectionPool::~ConnectionPool()
 
 bool ConnectionPool::Ping(int fd)
 {
+    // 1. 备份原有的超时设置
+    struct timeval old_tv;
+    socklen_t len = sizeof(old_tv);
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&old_tv, &len) < 0) {
+        return false;
+    }
+
+    // 定义一个守卫，在作用域结束时还原现场
+    struct TimeoutGuard {
+        int fd_;
+        struct timeval old_tv_;
+        ~TimeoutGuard() {
+            setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&old_tv_, sizeof(old_tv_));
+        }
+    } guard{fd, old_tv};
+
+    // 2. 设置短超时 (500ms) 执行探测
+    struct timeval tv_temp;
+    tv_temp.tv_sec = 0;
+    tv_temp.tv_usec = 500000;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv_temp, sizeof(tv_temp)) < 0) {
+        return false;
+    }
+
     myrpc::RpcHeader pingHeader;
     pingHeader.set_msg_type(myrpc::PING);
 
-    std::string header_str;
-    pingHeader.SerializeToString(&header_str);
-
-    uint32_t header_size = header_str.size();
-    uint32_t net_header_size = htonl(header_size);
-
     std::string send_buf;
+    uint32_t header_size = pingHeader.ByteSizeLong();
+    uint32_t net_header_size = htonl(header_size);
     send_buf.append((const char *)&net_header_size, 4);
-    send_buf.append(header_str);
+    pingHeader.AppendToString(&send_buf);
 
     // 发送 Ping
     if (send(fd, send_buf.c_str(), send_buf.size(), 0) == -1) {
@@ -152,9 +172,8 @@ void ConnectionPool::ReleaseConnection(const std::string &ip, uint16_t port, int
     }
 
     std::string key = ip + ":" + std::to_string(port);
-    // 检查是否达到最大空闲上限
     std::lock_guard<std::mutex> lock(mutex);
-    if (pool[key].size() >= max_idle_per_host) {
+    if (pool[key].size() >= max_idle_per_host) { // 检查是否达到最大空闲上限
         // 超过空闲上限，不要放回队列，直接物理关闭
         close(fd);
         // 回收活跃计数配额
