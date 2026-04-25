@@ -1,7 +1,9 @@
 #include "connection_pool.h"
 #include "rpc_header.pb.h"
+#include "net_utils.h"
+
+#include <arpa/inet.h>
 #include <netinet/tcp.h>
-#include <sys/time.h>
 
 ConnectionPool::~ConnectionPool()
 {
@@ -17,28 +19,6 @@ ConnectionPool::~ConnectionPool()
             }
         }
     }
-}
-
-ssize_t ConnectionPool::recv_exact(int fd, char *buffer, size_t length)
-{
-    size_t total_received = 0;
-    while (total_received < length) {
-        ssize_t bytes = recv(fd, buffer + total_received, length - total_received, 0);
-        if (bytes > 0) {
-            total_received += bytes;
-        } else if (bytes == 0) {
-            // 对端关闭了连接
-            return total_received;
-        } else {
-            // 被系统信号中断，继续尝试读取
-            if (errno == EINTR) {
-                continue;
-            }
-            // 真正发生网络错误
-            return -1;
-        }
-    }
-    return total_received;
 }
 
 bool ConnectionPool::Ping(int fd)
@@ -63,14 +43,14 @@ bool ConnectionPool::Ping(int fd)
 
     // 接收 Pong
     uint32_t recv_size = 0;
-    if (recv_exact(fd, (char *)&recv_size, 4) != 4) {
+    if (net_utils::recv_exact(fd, (char *)&recv_size, 4) != 4) {
         return false;
     }
 
     recv_size = ntohl(recv_size);
     std::string recv_buf;
     recv_buf.resize(recv_size);
-    if (recv_exact(fd, &recv_buf[0], recv_size) != recv_size) {
+    if (net_utils::recv_exact(fd, &recv_buf[0], recv_size) != recv_size) {
         return false;
     }
 

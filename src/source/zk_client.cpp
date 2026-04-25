@@ -2,6 +2,7 @@
 #include "rpc_application.h"
 
 #include <glog/logging.h>
+#include <thread>
 
 void global_watcher(zhandle_t *zh, int type, int state, const char *path, void *watcher_context)
 {
@@ -10,6 +11,12 @@ void global_watcher(zhandle_t *zh, int type, int state, const char *path, void *
     if (type == ZOO_SESSION_EVENT) {
         if (state == ZOO_CONNECTED_STATE) {
             client->NotifyConnected(); // 调用 ZkClient 的 NotifyConnected 方法，通知连接成功
+        } else if (state == ZOO_EXPIRED_SESSION_STATE) {
+            LOG(ERROR) << "ZK Session Expired! Attempting to reconnect...";
+            // 异步重连，防止阻塞 ZK 线程
+            std::thread([client]() {
+                client->Reconnect();
+            }).detach();
         }
     }
     // 2. 处理子节点变动
@@ -35,15 +42,64 @@ void ZkClient::NotifyConnected()
     cv.notify_all(); // 唤醒阻塞在 condition_variable 上的线程
 }
 
-void ZkClient::SetNotifyHandler(ZkNotifyHandler handler)
+void ZkClient::SubscribeWatcher(const std::string &path, ZkNotifyHandler handler)
 {
-    notify_handler = std::move(handler);
+    std::unique_lock<std::shared_mutex> lock(handlers_mtx);
+    notify_handlers[path] = std::move(handler);
 }
 
 void ZkClient::InvokeNotifyHandler(int type, const char *path)
 {
-    if (notify_handler && path != nullptr) {
-        notify_handler(type, std::string(path));
+    if (path == nullptr) {
+        return;
+    }
+
+    std::string path_str(path);
+    ZkNotifyHandler handler_to_call = nullptr;
+
+    // 加读锁，查找对应的 handler
+    {
+        std::shared_lock<std::shared_mutex> lock(handlers_mtx);
+        auto it = notify_handlers.find(path_str);
+        if (it != notify_handlers.end()) {
+            handler_to_call = it->second;
+        }
+    }
+
+    // 找到后执行回调 (在锁外执行，防止死锁或回调执行太慢阻塞其他线程)
+    if (handler_to_call) {
+        handler_to_call(type, path_str);
+    }
+}
+
+void ZkClient::SetRecoveryHandler(SessionRecoveryHandler handler)
+{
+    recovery_handler = handler;
+}
+
+void ZkClient::Reconnect() {
+    // 1. 关闭老句柄
+    if (zk_handle != nullptr) {
+        zookeeper_close(zk_handle);
+        zk_handle = nullptr;
+    }
+    
+    // 2. 重置连接标志
+    connected = false;
+
+    // 3. 重新调用初始化
+    LOG(INFO) << "Re-initializing zookeeper...";
+    zk_handle = zookeeper_init(conn_str.c_str(), global_watcher, 10000, nullptr, this, 0);
+    
+    // 4. 等待新的连接成功
+    std::unique_lock<std::mutex> lock(mtx);
+    cv.wait(lock, [this] { return connected; });
+
+    // 5. 通知上层 Provider 重新注册服务
+    if (recovery_handler) {
+        LOG(INFO) << "ZK reconnected, triggering service re-registration...";
+        std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 3000));
+        recovery_handler();
     }
 }
 
@@ -103,47 +159,45 @@ void ZkClient::Create(const char *path, const char *data, int datalen, int state
     }
 
     // 2. 创建最终的目标节点
-    int res = zoo_exists(zk_handle, path_str.c_str(), 0, nullptr);
-    if (res == ZOK) {
-        // 如果节点已经存在，可能是上次宕机残留的幽灵节点，先强制删除
-        LOG(WARNING) << "Znode already exists, possibly leftover from previous crash. Deleting: " << path_str;
-        zoo_delete(zk_handle, path_str.c_str(), -1); // -1 表示忽略版本号强制删除
-        res = ZNONODE;                               // 重置状态，让它继续往下走去创建
-    }
-    if (res == ZNONODE) {
-        char path_buffer[256];
-        int rc = zoo_create(
-            zk_handle, path_str.c_str(), data, datalen, &ZOO_OPEN_ACL_UNSAFE, state, path_buffer, sizeof(path_buffer));
-        if (rc != ZOK) {
-            LOG(FATAL) << "Create znode failed: " << path_str << ", code: " << rc;
-        } else {
-            LOG(INFO) << "Create znode success: " << path_str;
+    char path_buffer[256];
+    int rc = zoo_create(zk_handle, path_str.c_str(), data, datalen, &ZOO_OPEN_ACL_UNSAFE, state, path_buffer, sizeof(path_buffer));
+    if (rc == ZOK) {
+        LOG(WARNING) << "Create znode success: " << path_str;
+    } else if (rc == ZNODEEXISTS) {
+        LOG(ERROR) << "Znode already exists! Another instance is running at: " << path_str;
+        // 如果这是临时节点 (state & ZOO_EPHEMERAL)，说明冲突严重，建议直接结束进程
+        if (state & ZOO_EPHEMERAL) {
+            LOG(FATAL) << "Service registration conflict. Please check your port configuration!";
+            exit(EXIT_FAILURE); 
         }
+    } else {
+        LOG(FATAL) << "Create znode failed: " << path_str << ", code: " << rc;
     }
 }
 
-std::vector<std::string> ZkClient::GetChildren(const char *path, bool watch)
+bool ZkClient::GetChildren(const char *path, std::vector<std::string> &children, bool watch)
 {
-    std::vector<std::string> children;
+    children.clear();
     struct String_vector strings;
 
     // 调用 ZK C API：第三个参数 watch 设为 1 表示在该路径上挂载子节点监听
     // 当有 Provider 上线（新增子节点）或下线（删除子节点）时，会触发 ZOO_CHILD_EVENT
-    int flag = zoo_get_children(zk_handle, path, watch ? 1 : 0, &strings);
-    if (flag != ZOK) {
-        LOG(ERROR) << "Get children error... path: " << path << ", code: " << flag;
-        return children; // 如果失败（例如该服务还没有任何提供者注册），返回空 vector
+    int rc = zoo_get_children(zk_handle, path, watch ? 1 : 0, &strings);
+    if (rc != ZOK) {
+        if (rc == ZNONODE) {
+            return true; // 返回成功，但 children 为空
+        }
+        // 如果是其他错误（网络、超时、Session失效），返回失败
+        LOG(ERROR) << "ZK GetChildren failed... path: " << path << ", code: " << rc;
+        return false;
     }
 
-    // 遍历提取子节点数据
+    // 成功获取，填充数据
     for (int i = 0; i < strings.count; ++i) {
         children.emplace_back(strings.data[i]);
     }
-
-    // 必须释放底层的字符串数组内存，否则会造成内存泄漏
     deallocate_String_vector(&strings);
-
-    return children;
+    return true;
 }
 
 void ZkClient::Close()

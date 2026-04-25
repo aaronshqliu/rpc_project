@@ -22,6 +22,11 @@ private:
     std::function<void()> cb;
 };
 
+muduo::net::EventLoop* RpcProvider::GetEventLoop()
+{
+    return &event_loop;
+}
+
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
     ServiceInfo info;
@@ -42,10 +47,10 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
 void RpcProvider::Run()
 {
     // 读取配置（IP + port）
-    std::string ip = RpcApplication::GetInstance().GetConfig().GetString("rpc_server_ip");
-    uint16_t port = atoi(RpcApplication::GetInstance().GetConfig().GetString("rpc_server_port").c_str());
+    m_ip = RpcApplication::GetInstance().GetConfig().GetString("rpc_server_ip");
+    m_port = atoi(RpcApplication::GetInstance().GetConfig().GetString("rpc_server_port").c_str());
 
-    muduo::net::InetAddress address(ip, port);
+    muduo::net::InetAddress address(m_ip, m_port);
     muduo::net::TcpServer server(&event_loop, address, "RpcProvider");
 
     // 绑定连接回调和消息回调，分离网络连接业务和消息处理业务
@@ -53,25 +58,32 @@ void RpcProvider::Run()
     server.setMessageCallback(
         std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
     server.setThreadNum(4);
+    server.start();
 
-    // 将注册的服务发布到 ZooKeeper 上，供客户端发现
+    // 设置重连回调并注册
     ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
+    zk.SetRecoveryHandler(std::bind(&RpcProvider::RegisterServiceToZk, this));
+
+    zk.Start();
+    RegisterServiceToZk();
+    event_loop.loop();
+}
+
+void RpcProvider::RegisterServiceToZk()
+{
+    ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
+    std::string port_str = std::to_string(m_port);
+    std::string host_data = m_ip + ":" + port_str;
+
     for (auto &[service_name, service_info] : service_map) {
         for (auto &[method_name, method_desc] : service_info.method_map) {
-            // /Service_Name/Method_Name 
             std::string method_path = "/" + service_name + "/" + method_name;
+            std::string instance_path = method_path + "/" + host_data;
 
-            // 节点存储的数据是当前 provider 的 ip:port
-            std::string method_path_data = ip + ":" + std::to_string(port);
-            std::string instance_path = method_path + "/" + method_path_data;
-
-            // ZOO_EPHEMERAL 临时节点，断开连接自动删除
-            zk.Create(instance_path.c_str(), method_path_data.c_str(), method_path_data.size(), ZOO_EPHEMERAL);
-            LOG(INFO) << "Register RPC service: " << instance_path.c_str() << " success!";
+            zk.Create(instance_path.c_str(), host_data.c_str(), host_data.size(), ZOO_EPHEMERAL);
+            LOG(INFO) << "Register RPC service: " << instance_path << " success!";
         }
     }
-    server.start();
-    event_loop.loop();
 }
 
 void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)

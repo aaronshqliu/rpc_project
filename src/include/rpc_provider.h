@@ -13,16 +13,21 @@ public:
     ~RpcProvider();
     void NotifyService(google::protobuf::Service *service);
     void Run();
-    muduo::net::EventLoop* GetEventLoop() { return &event_loop; }
+    muduo::net::EventLoop* GetEventLoop();
 
 private:
     void OnConnection(const muduo::net::TcpConnectionPtr &conn);
+
     void OnMessage(const muduo::net::TcpConnectionPtr &conn,
                    muduo::net::Buffer *buffer,
                    muduo::Timestamp receive_time);
+
     void SendResponse(const muduo::net::TcpConnectionPtr &conn,
                       google::protobuf::Message *request,
                       google::protobuf::Message *response); // 服务分发后的回调
+
+    // 将 service_map 中的所有服务重新发布到 ZK
+    void RegisterServiceToZk();
 
     muduo::net::EventLoop event_loop;
 
@@ -36,6 +41,9 @@ private:
 
     // 整个 RPC Provider 的总路由表。Key 是服务名（比如 "UserServiceRpc"），Value 是对应的服务档案，也就是上面的 ServiceInfo。
     std::unordered_map<std::string, ServiceInfo> service_map;
+
+    std::string m_ip;   // 缓存服务器IP
+    uint16_t m_port;    // 缓存服务器端口
 };
 
 #endif // RPC_PROVIDER_H

@@ -1,14 +1,10 @@
 #ifndef CONNECTION_POOL_H
 #define CONNECTION_POOL_H
 
-#include <arpa/inet.h>
 #include <chrono>
 #include <memory>
 #include <mutex>
 #include <queue>
-#include <string>
-#include <sys/socket.h>
-#include <unistd.h>
 #include <unordered_map>
 
 class ConnectionPool {
@@ -37,8 +33,6 @@ private:
     int CreateNewConnection(const std::string &ip, uint16_t port);
 
     bool Ping(int fd);
-
-    ssize_t recv_exact(int fd, char *buffer, size_t length);
 
     // 将队列中存储的 fd 改为带有时间戳的结构体
     // 连接在池子里排队时，它是 ConnectionItem（需要记录时间以供心跳检测）；连接被业务取走使用时，它退化为普通的 int fd。

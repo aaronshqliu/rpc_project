@@ -1,28 +1,12 @@
 #include "rpc_channel.h"
 #include "connection_pool.h"
+#include "net_utils.h"
 #include "rpc_application.h"
 #include "rpc_header.pb.h"
 #include "zk_client.h"
 
 #include <arpa/inet.h>
 #include <glog/logging.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-MyRpcChannel::MyRpcChannel()
-{
-    ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
-    zk.SetNotifyHandler([this](int type, const std::string &path) {
-        // ZOO_CHILD_EVENT: 监听到服务提供者上线/下线 (子节点发生增减)
-        // ZOO_DELETED_EVENT: 监听到整个方法节点都被删除了 (极端情况)
-        if (type == ZOO_CHILD_EVENT || type == ZOO_DELETED_EVENT) {
-            std::unique_lock<std::shared_mutex> lock(this->cache_mutex);
-            if (this->host_cache.erase(path)) {
-                LOG(INFO) << "Watcher triggered: Children changed, Cache invalidated for path: " << path.c_str();
-            }
-        }
-    });
-}
 
 void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
     ::google::protobuf::RpcController *controller, const ::google::protobuf::Message *request,
@@ -78,8 +62,7 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         if (client_fd == -1) {
             // 连接失败的处理逻辑：剔除坏节点
             std::string zk_path = "/" + service_name + "/" + method_name;
-            std::string current_host_str = host.ip + ":" + std::to_string(host.port);
-            RemoveInvalidHost(zk_path, current_host_str);
+            RemoveInvalidHost(zk_path, host);
             continue; // 重试
         }
 
@@ -95,7 +78,7 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         // 服务端发回的格式是：[4字节 Length] + [Response Data]
         uint32_t recv_size = 0;
         // 先精准读取前 4 个字节，获取响应总长度
-        if (recv_exact(client_fd, (char *)&recv_size, 4) != 4) {
+        if (net_utils::recv_exact(client_fd, (char *)&recv_size, 4) != 4) {
             ConnectionPool::GetInstance().CloseConnection(client_fd);
             controller->SetFailed("Recv response header timeout or failed!");
             return;
@@ -110,7 +93,7 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
 
         std::string recv_buf;
         recv_buf.resize(recv_size);
-        if (recv_exact(client_fd, &recv_buf[0], recv_size) == recv_size) {
+        if (net_utils::recv_exact(client_fd, &recv_buf[0], recv_size) == recv_size) {
             if (!response->ParseFromArray(&recv_buf[0], recv_size)) {
                 controller->SetFailed("Parse response error!");
                 ConnectionPool::GetInstance().CloseConnection(client_fd); // 数据包错乱，安全起见销毁连接
@@ -134,28 +117,6 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
     }
 }
 
-ssize_t MyRpcChannel::recv_exact(int fd, char *buffer, size_t length)
-{
-    size_t total_received = 0;
-    while (total_received < length) {
-        ssize_t bytes = recv(fd, buffer + total_received, length - total_received, 0);
-        if (bytes > 0) {
-            total_received += bytes;
-        } else if (bytes == 0) {
-            // 对端关闭了连接
-            return total_received;
-        } else {
-            // 被系统信号中断，继续尝试读取
-            if (errno == EINTR) {
-                continue;
-            }
-            // 真正发生网络错误
-            return -1;
-        }
-    }
-    return total_received;
-}
-
 MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &service_name, const std::string &method_name)
 {
     std::string path = "/" + service_name + "/" + method_name;
@@ -171,7 +132,7 @@ MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &servic
     }
 
     // 2. 缓存未命中，去 ZK 查询
-    if (!node_list) {
+    {
         std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
 
         // 防止多个线程同时发现缓存为空，阻塞在锁外，拿到锁后重复查询ZK
@@ -181,52 +142,66 @@ MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &servic
         } else {
             // 真正去请求 ZooKeeper，并开启 Watcher
             ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
-            std::vector<std::string> available_hosts = zk.GetChildren(path.c_str(), true);
+            std::vector<std::string> available_hosts;
 
-            if (!available_hosts.empty()) {
-                // 创建新的节点列表结构体
+            if (!zk.GetChildren(path.c_str(), available_hosts, true)) {
+                // 情况 A：ZK 挂了。因为此时缓存也为空，我们实在找不到节点了
+                LOG(ERROR) << "ZK is DOWN and no local cache for: " << path;
+                return {"", 0};
+            }
+
+            if (available_hosts.empty()) {
+                // 情况 B：ZK 正常，但该服务确实一个 Provider 都没有
+                LOG(ERROR) << "Service exist in ZK but has NO instances: " << path;
+                return {"", 0};
+            }
+
+            // 情况 C：查询成功且有节点，解析并更新缓存
+            std::vector<ServiceHost> parsed_hosts = ParseHostStrings(available_hosts);
+            if (!parsed_hosts.empty()) {
                 node_list = std::make_shared<ServiceNodeList>();
-                node_list->hosts = std::move(available_hosts);
+                node_list->hosts = std::move(parsed_hosts);
+                host_cache[path] = node_list;
 
-                host_cache[path] = node_list; // 更新缓存
-                LOG(INFO) << "Cache updated for path: " << path << ", found " << node_list->hosts.size() << " instances.";
+                LOG(INFO) << "--------------------------------------------------";
+                LOG(INFO) << "[Service Discovery] Path: " << path;
+                LOG(INFO) << "[Service Discovery] Status: ONLINE";
+                LOG(INFO) << "[Service Discovery] Instances Found: " << node_list->hosts.size();
+                LOG(INFO) << "--------------------------------------------------";
+
+                // 注册监听
+                zk.SubscribeWatcher(path, [this](int type, const std::string &changed_path) {
+                    this->BackgroundRefreshCache(changed_path);
+                });
             }
         }
     }
 
-    // 依然没有可用节点，说明服务全部宕机或未启动
-    if (!node_list || node_list->hosts.empty()) {
-        LOG(ERROR) << "No available instances for service: " << service_name << " method: " << method_name;
-        return {"", 0};
+    // 3. 客户端侧负载均衡 (轮询)
+    if (node_list && !node_list->hosts.empty()) {
+        return GetHostByRoundRobin(node_list);
     }
 
-    // 3. 客户端侧负载均衡 (Round-Robin 轮询)
-    // std::memory_order_relaxed: 只关心原子自增，不关心内存屏障同步，这样性能最高
-    uint32_t current_idx = node_list->next_idx.fetch_add(1, std::memory_order_relaxed);
-
-    // 从专属的主机列表中取出一个节点
-    std::string target_host_str = node_list->hosts[current_idx % node_list->hosts.size()];
-
-    // 4. 解析并返回最终选定的 IP 和 Port
-    size_t colon_idx = target_host_str.find(":");
-    if (colon_idx == std::string::npos) {
-        LOG(ERROR) << "Invalid host data format from ZK: " << target_host_str;
-        return {"", 0};
-    }
-
-    ServiceHost host;
-    host.ip = target_host_str.substr(0, colon_idx);
-    host.port = static_cast<uint16_t>(std::stoi(target_host_str.substr(colon_idx + 1)));
-
-    return host;
+    return {"", 0};
 }
 
-void MyRpcChannel::RemoveInvalidHost(const std::string &path, const std::string &invalid_host_str)
+void MyRpcChannel::PreFetchService(const std::string &service_name, const std::string &method_name)
+{
+    QueryZkForHost(service_name, method_name);
+}
+
+MyRpcChannel::ServiceHost MyRpcChannel::GetHostByRoundRobin(std::shared_ptr<ServiceNodeList> list)
+{
+    // std::memory_order_relaxed: 只关心原子自增，不关心内存屏障同步，这样性能最高
+    uint32_t idx = list->next_idx.fetch_add(1, std::memory_order_relaxed);
+    return list->hosts[idx % list->hosts.size()];
+}
+
+void MyRpcChannel::RemoveInvalidHost(const std::string &path, const ServiceHost &invalid_host)
 {
     // 获取独占写锁，保护 host_cache 这个 Map 结构
     std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
     auto it = host_cache.find(path);
-
     // 确保节点存在且指针不为空
     if (it != host_cache.end() && it->second) {
         auto old_list = it->second;
@@ -236,8 +211,8 @@ void MyRpcChannel::RemoveInvalidHost(const std::string &path, const std::string 
 
         // 2. 将健康的节点全部拷贝过去，跳过那个失效的节点
         for (const auto &h : old_list->hosts) {
-            if (h != invalid_host_str) {
-                new_list->hosts.push_back(h);
+            if (h != invalid_host) {
+                new_list->hosts.emplace_back(h);
             }
         }
 
@@ -251,7 +226,65 @@ void MyRpcChannel::RemoveInvalidHost(const std::string &path, const std::string 
 
             // 5. 原子替换智能指针！旧指针会在没线程用它时自动销毁
             it->second = new_list;
-            LOG(INFO) << "Actively removed invalid host: " << invalid_host_str << " from cache.";
+            LOG(INFO) << "Actively removed invalid host: " << invalid_host.ToString() << " from cache.";
         }
     }
+}
+
+void MyRpcChannel::BackgroundRefreshCache(const std::string &path)
+{
+    ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
+    std::vector<std::string> new_host_strs;
+
+    // 1. 重新向 ZK 拉取最新的节点列表（注意 watch 参数依然为 true，为了监听下一次变化）
+    // 检查查询是否成功
+    if (!zk.GetChildren(path.c_str(), new_host_strs, true)) {
+        // 如果 ZK 查询报错（网络问题等），不清空缓存，而是保留旧缓存继续使用，这叫“容错降级”。
+        LOG(WARNING) << "ZK update failed, keeping STALE cache for path: " << path;
+        return;
+    }
+
+    // 2. 解析新的节点数据
+    std::vector<ServiceHost> parsed_hosts = ParseHostStrings(new_host_strs);
+
+    // 3. 执行写时复制 (COW) 替换缓存
+    std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
+    auto it = host_cache.find(path);
+
+    if (parsed_hosts.empty()) {
+        // 如果全宕机了，只能清空
+        if (it != host_cache.end()) {
+            host_cache.erase(it);
+        }
+        LOG(WARNING) << "All nodes down for path: " << path << ". Cache cleared.";
+    } else {
+        // 创建新列表，平滑替换旧列表
+        auto new_list = std::make_shared<ServiceNodeList>();
+        new_list->hosts = std::move(parsed_hosts);
+
+        // 继承旧的轮询计数器，保证负载均衡不断档
+        if (it != host_cache.end() && it->second) {
+            new_list->next_idx.store(it->second->next_idx.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+
+        host_cache[path] = new_list; // 原子替换指针
+        LOG(INFO) << "Background refresh success for path: " << path << ", new node count: " << new_list->hosts.size();
+    }
+}
+
+std::vector<MyRpcChannel::ServiceHost> MyRpcChannel::ParseHostStrings(const std::vector<std::string> &host_strs)
+{
+    std::vector<ServiceHost> parsed_hosts;
+    for (const auto &host_str : host_strs) {
+        size_t idx = host_str.find(":");
+        if (idx != std::string::npos) {
+            ServiceHost host;
+            host.ip = host_str.substr(0, idx);
+            host.port = static_cast<uint16_t>(std::stoi(host_str.substr(idx + 1)));
+            parsed_hosts.emplace_back(host);
+        } else {
+            LOG(ERROR) << "Invalid host data format from ZK: " << host_str;
+        }
+    }
+    return parsed_hosts;
 }
