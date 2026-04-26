@@ -7,34 +7,11 @@
 #include <glog/logging.h>
 #include <netinet/tcp.h>
 
-ConnectionPool::ConnectionPool()
-{
-    max_idle_per_host = stoi(RpcApplication::GetInstance().GetConfig().GetString("max_idle_per_host"));
-    max_active_per_host = stoi(RpcApplication::GetInstance().GetConfig().GetString("max_active_per_host"));
-
-    LOG(INFO) << "ConnectionPool initialized. Max Idle: " << max_idle_per_host
-              << ", Max Active: " << max_active_per_host;
-}
-
 ConnectionPool::~ConnectionPool()
 {
     std::lock_guard<std::mutex> lock(mutex);
 
-    // 1. 连接泄露检测：抓出没有归还的连接
-    for (const auto &[host, total_active] : active_counts) {
-        int idle_count = 0;
-        if (pool.find(host) != pool.end()) {
-            idle_count = pool[host].size();
-        }
-
-        int leaked_count = total_active - idle_count;
-        if (leaked_count > 0) {
-            LOG(ERROR) << "FATAL: True Connection LEAK detected! Host: " << host 
-                       << " leaked " << leaked_count << " connections that were never returned!";
-        }
-    }
-
-    // 2. 清理所有待在池子里的空闲连接
+    // 清理所有待在池子里的空闲连接
     for (auto &pair : pool) {
         while (!pair.second.empty()) {
             ConnectionItem item = pair.second.front();
@@ -135,26 +112,12 @@ int ConnectionPool::GetConnection(const std::string &ip, uint16_t port)
 
                 fd = item.fd;
                 last_active = item.last_active_time;
-            } else {
-                // 池子里没有，准备新建前检查活跃连接总数
-                if (active_counts[key] >= max_active_per_host) {
-                    LOG(ERROR) << "Connection limit reached (" << max_active_per_host << ") for host: " << key;
-                    return -2; // 返回 -2 表示超载
-                }
-                // 没满，先“占领”一个活跃名额，防止并发时被别的线程抢占超售
-                active_counts[key]++;
             }
         }
 
         // 如果池子里面没拿到，直接跳出循环去新建
         if (fd == -1) {
-            fd = CreateNewConnection(ip, port);
-            if (fd == -1) {
-                // 如果建连失败了（比如网络不通），必须把刚才占的名额退回来
-                std::lock_guard<std::mutex> lock(mutex);
-                active_counts[key]--;
-            }
-            return fd; // 无论成功失败，直接返回
+            return CreateNewConnection(ip, port);
         }
 
         // 拿到了，在【无锁】状态下进行空闲判断和 Ping 测试。
@@ -183,29 +146,15 @@ void ConnectionPool::ReleaseConnection(const std::string &ip, uint16_t port, int
     if (fd == -1) {
         return;
     }
-
     std::string key = ip + ":" + std::to_string(port);
     std::lock_guard<std::mutex> lock(mutex);
-    if (pool[key].size() >= max_idle_per_host) { // 检查是否达到最大空闲上限
-        // 超过空闲上限，不要放回队列，直接物理关闭
-        close(fd);
-        // 回收活跃计数配额
-        active_counts[key]--;
-    } else {
-        // 没满，放回池子，更新最后活跃时间
-        pool[key].emplace(fd, std::chrono::steady_clock::now());
-    }
+    pool[key].emplace(fd, std::chrono::steady_clock::now());
 }
 
 void ConnectionPool::CloseConnection(const std::string &ip, uint16_t port, int fd)
 {
-    std::string key = ip + ":" + std::to_string(port);
-    close(fd); // 物理关闭 socket
-
-    // 同步扣减活跃名额
-    std::lock_guard<std::mutex> lock(mutex);
-    if (active_counts[key] > 0) {
-        active_counts[key]--;
+    if (fd != -1) {
+        close(fd);
     }
 }
 

@@ -108,8 +108,8 @@ int main(int argc, char **argv)
 {
     RpcApplication::GetInstance().Init(argc, argv);
 
-    const int thread_counts = 500;
-    const int requests_per_thread = 1000;
+    const int thread_counts = 64;
+    const int requests_per_thread = 10000;
     std::vector<std::thread> threads;
     std::atomic<int> success_counts(0);
     std::atomic<int> failure_counts(0);

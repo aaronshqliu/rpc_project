@@ -34,11 +34,6 @@ private:
         {
             return !(*this == other);
         }
-
-        std::string ToString() const
-        {
-            return ip + ":" + std::to_string(port);
-        }
     };
 
     // 将主机列表和独立的轮询计数器绑定在一起

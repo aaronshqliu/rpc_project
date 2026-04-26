@@ -67,10 +67,23 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
 
         // 4.2 从连接池获取连接
         client_fd = ConnectionPool::GetInstance().GetConnection(host.ip, host.port);
-        if (client_fd == -1) {  // 建连失败：服务器网络不通或宕机，必须剔除坏节点。
-            LOG(WARNING) << "Connect failed, removing invalid host: " << host.ip << ":" << host.port;
-            std::string zk_path = "/" + service_name + "/" + method_name;
-            RemoveInvalidHost(zk_path, host);
+        if (client_fd == -1) {
+            LOG(ERROR) << "GetConnection failed for " << host.ip << ":" << host.port 
+                       << " | errno: " << errno << " (" << strerror(errno) << ")";
+
+            if (errno == EMFILE || errno == ENFILE) {
+                // 客户端自身资源耗尽，不能错杀服务端，直接终止本次 RPC 重试。
+                LOG(FATAL) << "Client FD exhausted! Aborting current RPC request.";
+                return; 
+            }
+
+            if (errno == ECONNREFUSED || errno == ETIMEDOUT) {
+                // 这是明确的服务端宕机或网络不通的信号，执行剔除。
+                LOG(WARNING) << "Server dead or unreachable. Removing invalid host: " << host.ip << ":" << host.port;
+                std::string zk_path = "/" + service_name + "/" + method_name;
+                RemoveInvalidHost(zk_path, host);
+            }
+
             continue; // 重试下一台
         } else if (client_fd == -2) {  // 连接池已满：服务器健康，只是太忙了，不要剔除它。
             LOG(WARNING) << "Host is too busy (connection pool full): " << host.ip << ":" << host.port;
@@ -120,20 +133,36 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         break; // 建连成功并执行完收发，跳出重试循环
     }
 
-    // 1. 隐性耗尽，循环 3 次，每次都返回 -2（连接池满）。每次都 continue，且这 3 次循环中没有任何一行代码调用过 SetFailed
-    if (!rpc_success && !controller->Failed()) {  
-        controller->SetFailed("RPC Call failed: Exhausted all " + std::to_string(max_retries) + " retries for " + service_name);
-    }
-
-    // 2. 明确失败（如 ZK 彻底挂了）： 循环内第 3 次查 ZK 失败，代码执行了 controller->SetFailed("") 并 break 或耗尽循环。
+    // --- 退出重试循环后的兜底逻辑 ---
     if (!rpc_success) {
+        // 【分支 A：本地夭折】请求没有成功交发给网络层
+        // 1. 拦截隐性耗尽
+        if (!controller->Failed()) {  
+            controller->SetFailed("RPC Call failed: Exhausted all " + 
+                                  std::to_string(max_retries) + " retries for " + service_name);
+        }
+
+        // 2. 打印最终遗言
         LOG(ERROR) << "RPC Call aborted. Final error: " << controller->ErrorText();
+
+        // 3. 必须立刻调用 done，通知外层业务 RPC 失败了，别等了。
+        if (done != nullptr) {
+            done->Run();
+        }
+
+        // 拦截执行，绝对不要往下走了
+        return; 
     }
 
-    // 3. 绝对成功
-    if (done != nullptr) {
-        done->Run();
-    }
+    // 【分支 B：成功发送】
+    // 如果代码能走到这里，说明 rpc_success == true。
+    // 这意味着数据已经成功扔进了网络 socket。
+    // 此时绝对、绝对、绝对不能调用 done->Run()。
+    // 必须要等到 Muduo 的 OnMessage 收到服务器回包，并反序列化 response 成功后，
+    // 在 OnMessage 里面去调用 done->Run()。
+
+    // 所以这里直接结束 CallMethod 即可。
+    return;
 }
 
 MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &service_name, const std::string &method_name)
@@ -242,7 +271,6 @@ void MyRpcChannel::RemoveInvalidHost(const std::string &path, const ServiceHost 
 
             // 5. 原子替换智能指针！旧指针会在没线程用它时自动销毁
             it->second = new_list;
-            LOG(INFO) << "Actively removed invalid host: " << invalid_host.ToString() << " from cache.";
         }
     }
 }

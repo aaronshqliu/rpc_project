@@ -29,7 +29,7 @@ public:
     void CloseConnection(const std::string &ip, uint16_t port, int fd);
 
 private:
-    ConnectionPool();
+    ConnectionPool() = default;
     ~ConnectionPool();
 
     // 内部创建新连接的逻辑
@@ -86,24 +86,6 @@ private:
      */
     std::unordered_map<std::string, std::queue<ConnectionItem>> pool; // 空闲连接池：Key 为 "ip:port"，Value 为可用的 fd 队列
     std::mutex mutex;
-
-    /**
-     * max_idle_per_host（最大空闲连接数上限）
-     * 针对每一个目标节点，连接池里允许缓存（挂起保活）的最多闲置连接数。
-     * 当业务用完连接，调用 ReleaseConnection 准备把连接塞回 Queue 时，连接池会检查当前 Queue 里的连接数量。
-     * 系统行为：如果 Queue 里的连接数 < max_idle_per_host：把连接放回 Queue，继续保活。
-     * 如果 Queue 里的连接数 >= max_idle_per_host：直接将这个归还的连接物理关闭（Close/Destroy），丢弃掉，不再放入池中。
-     */
-    int max_idle_per_host;
-
-    /**
-     * max_active_per_host（最大活跃/并发连接数上限）
-     * 针对每一个目标节点（Host/IP），连接池内允许存在的最大连接总数（包括正在被业务借用的“忙碌”连接，加上停留在池子里的“空闲”连接）。
-     * 如果当前已创建的连接总数达到了这个值，且所有的连接都正在被使用（没有空闲的）。
-     * 系统行为： 连接池会拒绝创建新连接。此时业务的 GetConnection 调用会被阻塞（挂起等待），直到有其他线程归还连接。
-     */
-    int max_active_per_host;
-    std::unordered_map<std::string, int> active_counts;  // 记录每个 ip:port 当前一共创建了多少个连接（包含正在使用的）
 };
 
 #endif // CONNECTION_POOL_H

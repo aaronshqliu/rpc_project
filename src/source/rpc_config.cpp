@@ -48,15 +48,13 @@ std::string RpcConfig::GetString(const std::string &key) const
 void RpcConfig::Trim(std::string &str)
 {
     // 左 trim
-    str.erase(str.begin(), std::find_if(str.begin(), str.end(), [](unsigned char ch) {
-        return !std::isspace(ch);
-    }));
+    str.erase(str.begin(),
+              std::find_if(str.begin(), str.end(),
+                          [](unsigned char ch) { return !std::isspace(ch); }));
 
     // 右 trim
     str.erase(std::find_if(str.rbegin(), str.rend(),
-                  [](unsigned char ch) {
-                      return !std::isspace(ch);
-                  })
+                          [](unsigned char ch) { return !std::isspace(ch); })
                   .base(),
-        str.end());
+              str.end());
 }
