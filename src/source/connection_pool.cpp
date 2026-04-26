@@ -64,7 +64,20 @@ bool ConnectionPool::Ping(int fd)
         }
     } guard{fd, old_tv};
 
-    // 2. 设置短超时 (500ms) 执行探测
+    /**
+     * 2. 设置短超时 (500ms) 执行探测
+     * 如果没有设置这 500ms 会怎样？
+     * 假设此时服务端的机器电源被拔了，或者中间的防火墙把连接切断了（并且没发 RST 包）。
+     * 当执行到 recv(fd, buffer) 时，因为 TCP 连接表面上还在，但永远不会有数据回来了。
+     * Linux 底层的 recv 是一个阻塞调用，默认情况下，它会一直死等，可能会等上十几分钟甚至几个小时（直到系统底层的 TCP Keepalive 超时）。
+     * 这就意味着，你这个业务线程永远卡死在这一行代码上了。如果有 600 个并发请求，瞬间你的 600 个线程就全卡死在 Ping 上了，你的系统直接瘫痪。
+     * 
+     * 设置了 500ms 会怎样？（快速失败 Fail-fast）
+     * 设置了 SO_RCVTIMEO = 500000 微秒（即 500 毫秒）后，recv 最多只会等 500 毫秒。
+     * 如果 500 毫秒内服务端回了 Pong，说明连接极其健康，完美。
+     * 如果 500 毫秒没收到，recv 会立刻返回 -1，并把 errno 设置为 EAGAIN 或 EWOULDBLOCK。
+     * 此时 Ping 函数就能迅速返回 false，通知连接池这个 fd 已经死了，赶紧 Close 掉去建新连接。
+     */
     struct timeval tv_temp;
     tv_temp.tv_sec = 0;
     tv_temp.tv_usec = 500000;
@@ -144,11 +157,11 @@ int ConnectionPool::GetConnection(const std::string &ip, uint16_t port)
             return fd; // 无论成功失败，直接返回
         }
 
-        // 拿到了，在【无锁】状态下进行空闲判断和 Ping 测试
+        // 拿到了，在【无锁】状态下进行空闲判断和 Ping 测试。
         auto now = std::chrono::steady_clock::now();
         auto idle_duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_active).count();
 
-        if (idle_duration > 10) {
+        if (idle_duration > 10) { // 惰性心跳
             if (Ping(fd)) {
                 // 心跳存活，返回可用 fd
                 return fd;

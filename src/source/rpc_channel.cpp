@@ -7,6 +7,7 @@
 
 #include <arpa/inet.h>
 #include <glog/logging.h>
+#include <thread>
 
 void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
                               ::google::protobuf::RpcController *controller,
@@ -55,28 +56,31 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         // 4.1 每次循环都重新获取地址 (触发轮询负载均衡算法)
         ServiceHost host = QueryZkForHost(service_name, method_name);
         if (host.ip.empty()) {
-            controller->SetFailed("Query service from Zookeeper failed! Service: " + service_name);
+            LOG(WARNING) << "Retry " << i << ": Query ZK failed for " << service_name;
+            if (i == max_retries - 1) {  // 如果是最后一次循环了，才设置最终的失败状态
+                controller->SetFailed("RPC Failed: Cannot find service providers in ZK after retries.");
+                return; // 彻底退出 RPC 调用
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds((i + 1) * 10));  // 还没到最后一次，睡一会儿再查，给 ZK 恢复的时间
             continue;
         }
 
         // 4.2 从连接池获取连接
         client_fd = ConnectionPool::GetInstance().GetConnection(host.ip, host.port);
-        if (client_fd == -1) {
-            // 建连失败：服务器网络不通或宕机，必须剔除坏节点。
-            LOG(ERROR) << "Connect failed, removing invalid host: " << host.ip << ":" << host.port;
+        if (client_fd == -1) {  // 建连失败：服务器网络不通或宕机，必须剔除坏节点。
+            LOG(WARNING) << "Connect failed, removing invalid host: " << host.ip << ":" << host.port;
             std::string zk_path = "/" + service_name + "/" + method_name;
             RemoveInvalidHost(zk_path, host);
             continue; // 重试下一台
-        } else if (client_fd == -2) {
-            // 连接池已满：服务器健康，只是太忙了，不要剔除它。
+        } else if (client_fd == -2) {  // 连接池已满：服务器健康，只是太忙了，不要剔除它。
             LOG(WARNING) << "Host is too busy (connection pool full): " << host.ip << ":" << host.port;
-            continue; // 直接重试，轮询去尝试下一台机器
+            std::this_thread::sleep_for(std::chrono::milliseconds((i + 1) * 10)); // 睡一小会儿，给服务端喘息的时间，也给别的线程归还连接的时间
+            continue; // 重试，轮询去尝试下一台机器
         }
 
         // 5. 连接成功，跳出重试循环，进入数据收发阶段
         // 注意：数据发送失败不自动重试，防止非幂等操作重复执行
-        if (send(client_fd, send_buf.c_str(), send_buf.size(), 0) == -1) {
-            // 发送失败：说明连接已损坏，必须销毁，不能放回连接池。
+        if (send(client_fd, send_buf.c_str(), send_buf.size(), 0) == -1) {  // 发送失败：说明连接已损坏，必须销毁，不能放回连接池。
             ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
             controller->SetFailed("Send RPC request failed!");
             return;
@@ -84,8 +88,7 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
 
         // 服务端发回的格式是：[4字节 Length] + [Response Data]
         uint32_t recv_size = 0;
-        // 先精准读取前 4 个字节，获取响应总长度
-        if (net_utils::recv_exact(client_fd, (char *)&recv_size, 4) != 4) {
+        if (net_utils::recv_exact(client_fd, (char *)&recv_size, 4) != 4) {  // 先精准读取前 4 个字节，获取响应总长度
             ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
             controller->SetFailed("Recv response header timeout or failed!");
             return;
@@ -101,12 +104,11 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         std::string recv_buf;
         recv_buf.resize(recv_size);
         if (net_utils::recv_exact(client_fd, &recv_buf[0], recv_size) == recv_size) {
-            if (!response->ParseFromArray(&recv_buf[0], recv_size)) {
+            if (!response->ParseFromArray(&recv_buf[0], recv_size)) {   // 数据包错乱，安全起见销毁连接
                 controller->SetFailed("Parse response error!");
-                ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd); // 数据包错乱，安全起见销毁连接
-            } else {
+                ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
+            } else {  // RPC 调用彻底成功，将健康的连接放回池中复用！
                 rpc_success = true;
-                // RPC 调用彻底成功，将健康的连接放回池中复用！
                 ConnectionPool::GetInstance().ReleaseConnection(host.ip, host.port, client_fd);
             }
         } else {
@@ -118,9 +120,19 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
         break; // 建连成功并执行完收发，跳出重试循环
     }
 
-    // 检查重试是否耗尽
-    if (!rpc_success && !controller->Failed()) {
-        controller->SetFailed("RPC Call failed: Exhausted retries for " + service_name);
+    // 1. 隐性耗尽，循环 3 次，每次都返回 -2（连接池满）。每次都 continue，且这 3 次循环中没有任何一行代码调用过 SetFailed
+    if (!rpc_success && !controller->Failed()) {  
+        controller->SetFailed("RPC Call failed: Exhausted all " + std::to_string(max_retries) + " retries for " + service_name);
+    }
+
+    // 2. 明确失败（如 ZK 彻底挂了）： 循环内第 3 次查 ZK 失败，代码执行了 controller->SetFailed("") 并 break 或耗尽循环。
+    if (!rpc_success) {
+        LOG(ERROR) << "RPC Call aborted. Final error: " << controller->ErrorText();
+    }
+
+    // 3. 绝对成功
+    if (done != nullptr) {
+        done->Run();
     }
 }
 
@@ -144,8 +156,7 @@ MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &servic
         auto it = host_cache.find(path);
         if (it != host_cache.end() && it->second && !it->second->hosts.empty()) {
             node_list = it->second;
-        } else {
-            // 真正去请求 ZooKeeper，并开启 Watcher
+        } else {  // 真正去请求 ZooKeeper，并开启 Watcher
             ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
             std::vector<std::string> available_hosts;
 

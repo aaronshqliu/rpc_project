@@ -43,6 +43,11 @@ void SendRequest(int thread_id, std::shared_ptr<MyRpcChannel> shared_channel, st
         reg_request.set_username(unique_username);
         reg_request.set_password("12345");
 
+        // 第4个参数 google::protobuf::Closure *done：
+        // 1. 传 nullptr：明确告诉底层的 CallMethod：客户端线程是一个同步调用。
+        // 我会在这里阻塞，直到你通过网络把 reg_response 填满，我才会执行下一行代码。你搞定之后不需要叫醒我，因为我自己一直在等。
+        // 2. 传一个真实的 Closure 对象：明确告诉底层：客户端线程是一个异步调用。
+        // 我把请求交给你了，我先去干别的活儿。你什么时候收到服务端的包了，记得调用一下 done->Run() 来通知我。
         user_stub.Register(&controller, &reg_request, &reg_response, nullptr);
 
         if (controller.Failed()) {

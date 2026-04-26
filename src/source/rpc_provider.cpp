@@ -5,7 +5,17 @@
 
 #include <glog/logging.h>
 #include <muduo/net/InetAddress.h>
-#include <muduo/net/TcpServer.h>
+
+ConnectionEntry::ConnectionEntry(const muduo::net::TcpConnectionPtr &conn) : weak_conn(conn) {}
+
+ConnectionEntry::~ConnectionEntry()
+{
+    muduo::net::TcpConnectionPtr conn = weak_conn.lock();
+    if (conn) {
+        LOG(WARNING) << "Connection idle timeout! Kicking out: " << conn->peerAddress().toIpPort();
+        conn->forceClose();
+    }
+}
 
 // 自定义 Closure 类，接受一个 Lambda 表达式
 class RpcClosure : public google::protobuf::Closure {
@@ -22,7 +32,7 @@ private:
     std::function<void()> cb;
 };
 
-muduo::net::EventLoop* RpcProvider::GetEventLoop()
+muduo::net::EventLoop *RpcProvider::GetEventLoop()
 {
     return &event_loop;
 }
@@ -49,23 +59,31 @@ void RpcProvider::Run()
     // 读取配置（IP + port）
     m_ip = RpcApplication::GetInstance().GetConfig().GetString("rpc_server_ip");
     m_port = atoi(RpcApplication::GetInstance().GetConfig().GetString("rpc_server_port").c_str());
+    idle_timeout_seconds = atoi(RpcApplication::GetInstance().GetConfig().GetString("rpc_idle_timeout_seconds").c_str());
+    max_connections = atoi(RpcApplication::GetInstance().GetConfig().GetString("rpc_max_connections").c_str());
 
     muduo::net::InetAddress address(m_ip, m_port);
-    muduo::net::TcpServer server(&event_loop, address, "RpcProvider");
+    tcp_server = std::make_unique<muduo::net::TcpServer>(&event_loop, address, "RpcProvider");
 
     // 绑定连接回调和消息回调，分离网络连接业务和消息处理业务
-    server.setConnectionCallback(std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
-    server.setMessageCallback(
+    tcp_server->setConnectionCallback(std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
+    tcp_server->setMessageCallback(
         std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
-    server.setThreadNum(4);
-    server.start();
+    tcp_server->setThreadNum(4);
+    tcp_server->start();
+
+    // 启动时间轮滴答定时器
+    time_wheel.resize(idle_timeout_seconds);
+    event_loop.runEvery(1.0, std::bind(&RpcProvider::OnTimerTick, this));
 
     // 设置重连回调并注册
     ZkClient &zk = RpcApplication::GetInstance().GetZkClient();
     zk.SetRecoveryHandler(std::bind(&RpcProvider::RegisterServiceToZk, this));
-
     zk.Start();
     RegisterServiceToZk();
+
+    LOG(INFO) << "RpcProvider started on " << m_ip << ":" << m_port;
+
     event_loop.loop();
 }
 
@@ -88,8 +106,30 @@ void RpcProvider::RegisterServiceToZk()
 
 void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
 {
-    if (!conn->connected()) {
-        conn->shutdown();
+    if (conn->connected()) {
+        // 使用原子变量进行预检
+        int count = ++current_connections;
+        if (count > max_connections) {  // 超过最大承载，减回计数并强制关闭
+            --current_connections;
+            LOG(ERROR) << "Max connections reached (" << max_connections 
+                       << "), kicking " << conn->peerAddress().toIpPort();
+            conn->forceClose();  // forceClose 会直接发送 RST 包，不经过四次挥手，释放资源最快
+            return;
+        }
+
+        // 绑定时间轮
+        EntryPtr entry = std::make_shared<ConnectionEntry>(conn);  // 创建一个追踪器。此时 entry 引用计数为 1
+        time_wheel.back().insert(entry);  // 放入时间轮的末尾（最新的桶）。此时引用计数变为 2
+
+        conn->setContext(std::weak_ptr<ConnectionEntry>(entry));  // 将追踪器的弱引用存入 context，方便 OnMessage 刷新
+        LOG(WARNING) << "Client connected: " << conn->peerAddress().toIpPort() 
+                   << " [Total: " << count << "]";
+    } else {
+        // 无论是客户端主动断开，还是服务端由于超时/超限强制关闭，都会走到这里
+        --current_connections;
+
+        LOG(WARNING) << "Client disconnected: " << conn->peerAddress().toIpPort() 
+                   << " [Total: " << current_connections.load() << "]";
     }
 }
 
@@ -175,7 +215,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn,
             SendResponse(conn, request, response);
         });
 
-        // 调用业务逻辑
+        // 调用业务逻辑：Register、Login、MakeOrder等，这里可以放到线程池中完成
         service->CallMethod(method, nullptr, request, response, done);
     }
 }
@@ -200,6 +240,19 @@ void RpcProvider::SendResponse(const muduo::net::TcpConnectionPtr &conn,
 
     delete request;
     delete response;
+}
+
+void RpcProvider::OnTimerTick()
+{
+    time_wheel.emplace_back(Bucket());  // 原地构造一个全新的空桶，放入队尾
+    time_wheel.pop_front();  // 弹出最老的桶，利用智能指针引用计数自动清理死连接
+
+    static int tick_count = 0;
+    if (++tick_count % 10 == 0) { // 每 10 秒打印一次
+        LOG(INFO) << "=== [Server Metrics] Active Connections: " 
+                  << current_connections.load() << " / " << max_connections
+                  << " ===";
+    }
 }
 
 RpcProvider::~RpcProvider()
