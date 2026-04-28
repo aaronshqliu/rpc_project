@@ -118,6 +118,7 @@ int main(int argc, char **argv)
     auto shared_channel = std::make_shared<MyRpcChannel>();
 
     LOG(INFO) << "Initializing Service Discovery...";
+    shared_channel->PreFetchService("UserServiceRpc", "Register");
     shared_channel->PreFetchService("UserServiceRpc", "Login");
     shared_channel->PreFetchService("OrderServiceRpc", "MakeOrder");
 

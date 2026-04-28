@@ -62,14 +62,25 @@ bool ConnectionPool::Ping(int fd)
         return false;
     }
 
-    myrpc::RpcHeader pingHeader;
-    pingHeader.set_msg_type(myrpc::PING);
+    myrpc::RpcRequestHeader ping_header;
+    ping_header.set_msg_type(myrpc::PING);
+
+    std::string header_str;
+    ping_header.SerializeToString(&header_str);
+
+    uint32_t magic_num = 0x12345678;
+    uint32_t header_size = header_str.size();
+    uint32_t total_size = 4 + header_size; // Ping 也没有 Args
+
+    uint32_t net_magic_num = htonl(magic_num);
+    uint32_t net_total_size = htonl(total_size);
+    uint32_t net_header_size = htonl(header_size);
 
     std::string send_buf;
-    uint32_t header_size = pingHeader.ByteSizeLong();
-    uint32_t net_header_size = htonl(header_size);
+    send_buf.append((const char *)&net_magic_num, 4);
+    send_buf.append((const char *)&net_total_size, 4);
     send_buf.append((const char *)&net_header_size, 4);
-    pingHeader.AppendToString(&send_buf);
+    send_buf.append(header_str);
 
     // 发送 Ping
     if (send(fd, send_buf.c_str(), send_buf.size(), 0) == -1) {
@@ -77,22 +88,29 @@ bool ConnectionPool::Ping(int fd)
     }
 
     // 接收 Pong
-    uint32_t recv_size = 0;
-    if (net_utils::recv_exact(fd, (char *)&recv_size, 4) != 4) {
+    // 响应协议是：[4字节总长度] + [4字节Header长度] + [RpcResponseHeader]
+    uint32_t net_recv_total_size = 0;
+    if (net_utils::recv_exact(fd, (char *)&net_recv_total_size, 4) != 4) {
         return false;
     }
+    uint32_t recv_total_size = ntohl(net_recv_total_size);
 
-    recv_size = ntohl(recv_size);
     std::string recv_buf;
-    recv_buf.resize(recv_size);
-    if (net_utils::recv_exact(fd, &recv_buf[0], recv_size) != recv_size) {
+    recv_buf.resize(recv_total_size);
+    if (net_utils::recv_exact(fd, &recv_buf[0], recv_total_size) != recv_total_size) {
         return false;
     }
 
-    myrpc::RpcHeader pongHeader;
-    if (pongHeader.ParseFromArray(&recv_buf[0], recv_size)) {
-        return pongHeader.msg_type() == myrpc::PONG;
+    uint32_t recv_header_size = ntohl(*(uint32_t*)(&recv_buf[0]));
+    
+    myrpc::RpcResponseHeader pong_header;
+    if (pong_header.ParseFromArray(&recv_buf[4], recv_header_size)) {
+        // 校验确实是 PONG！
+        if (pong_header.msg_type() == myrpc::PONG && pong_header.errcode() == 0) {
+            return true; // 连接绝对健康！
+        }
     }
+
     return false;
 }
 

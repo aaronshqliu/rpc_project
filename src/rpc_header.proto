@@ -7,9 +7,15 @@ enum MessageType {
     PONG = 2;       // 心跳响应
 }
 
-message RpcHeader {
+message RpcRequestHeader {
     string service_name = 1;
     string method_name = 2;
     uint32 args_size = 3;
     MessageType msg_type = 4;
+}
+
+message RpcResponseHeader {
+    int32 errcode = 1;
+    string errmsg = 2;
+    MessageType msg_type = 3;
 }

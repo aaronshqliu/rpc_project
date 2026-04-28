@@ -58,8 +58,10 @@ make
 
 1.  **启动 RPC 服务端 (server)**：
     ```bash
-    ./bin/server -i ./conf/server1.conf
-    ./bin/server -i ./conf/server2.conf
+    ./bin/user_server -i ./conf/user_server_1.conf
+    ./bin/user_server -i ./conf/user_server_2.conf
+    ./bin/order_server -i ./conf/order_server_1.conf
+    ./bin/order_server -i ./conf/order_server_2.conf
     ```
 2.  **启动 RPC 客户端 (client)**：
     ```bash

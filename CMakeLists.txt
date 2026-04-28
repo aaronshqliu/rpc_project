@@ -15,9 +15,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
 # =========================================================
-# 第一部分：编译核心 RPC 框架 (生成 libmyrpc.a)
+# 第一部分：编译核心 RPC 框架
 # =========================================================
-
 # 自动扫描 src/source 下的所有 .cpp 源文件
 file(GLOB RPC_SOURCES "src/source/*.cpp")
 
@@ -42,11 +41,9 @@ target_link_libraries(myrpc PUBLIC
     glog
 )
 
-
 # =========================================================
-# 第二部分：编译业务层示例程序 (生成 server 和 client)
+# 第二部分：编译业务层示例程序
 # =========================================================
-
 # 自动编译 example 目录下的 protobuf 文件
 protobuf_generate_cpp(EXAMPLE_PROTO_SRCS EXAMPLE_PROTO_HDRS 
     example/user.proto 
@@ -60,14 +57,19 @@ include_directories(
 )
 
 # ---- 编译 Server 程序 ----
-add_executable(server 
-    example/server.cpp 
+add_executable(user_server 
+    example/user_server.cpp 
     example/user_service.cpp 
+    ${EXAMPLE_PROTO_SRCS}
+)
+target_link_libraries(user_server PRIVATE myrpc)
+
+add_executable(order_server 
+    example/order_server.cpp 
     example/order_service.cpp 
     ${EXAMPLE_PROTO_SRCS}
 )
-target_link_libraries(server PRIVATE myrpc)
-
+target_link_libraries(order_server PRIVATE myrpc)
 
 # ---- 编译 Client 程序 ----
 add_executable(client 

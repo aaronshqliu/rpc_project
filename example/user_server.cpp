@@ -1,4 +1,3 @@
-#include "order_service.h"
 #include "rpc_application.h"
 #include "rpc_provider.h"
 #include "user_service.h"
@@ -52,7 +51,6 @@ int main(int argc, char **argv)
     g_provider = &provider;
 
     provider.NotifyService(new UserService());  // 登录注册服务
-    provider.NotifyService(new OrderService()); // 订单服务
 
     provider.Run();
     LOG(INFO) << "Server completely shutdown. Goodbye!";

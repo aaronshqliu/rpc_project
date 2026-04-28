@@ -40,8 +40,8 @@ private:
     muduo::net::EventLoop event_loop;
     std::unique_ptr<muduo::net::TcpServer> tcp_server;
 
-    std::string m_ip;   // 缓存服务器IP
-    uint16_t m_port;    // 缓存服务器端口
+    std::string ip;   // 缓存服务器IP
+    uint16_t port;    // 缓存服务器端口
 };
 
 #endif // RPC_PROVIDER_H

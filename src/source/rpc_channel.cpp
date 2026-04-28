@@ -26,42 +26,54 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
     }
 
     // 2. 构造并序列化 RPC Header
-    myrpc::RpcHeader rpcHeader;
-    rpcHeader.set_service_name(service_name);
-    rpcHeader.set_method_name(method_name);
-    rpcHeader.set_args_size(args_str.size());
-    rpcHeader.set_msg_type(myrpc::NORMAL_RPC);
+    myrpc::RpcRequestHeader request_header;
+    request_header.set_service_name(service_name);
+    request_header.set_method_name(method_name);
+    request_header.set_args_size(args_str.size());
+    request_header.set_msg_type(myrpc::NORMAL_RPC);
 
     std::string header_str;
-    if (!rpcHeader.SerializeToString(&header_str)) {
+    if (!request_header.SerializeToString(&header_str)) {
         controller->SetFailed("Serialize RPC header error!");
         return;
     }
 
     // 3. 计算各部分长度并组装待发送报文
+    // 协议：| 4字节(魔数) | 4字节(总长度) | 4字节(Header长度) | 变长(Header) | 变长(Args) |
+    uint32_t magic_num = 0x12345678;
     uint32_t header_size = header_str.size();
+    uint32_t args_size = args_str.size();
+
+    // 总长度 = Header长度字段(4字节) + Header内容长度 + Args内容长度
+    uint32_t total_size = 4 + header_size + args_size;
+
+    // 转换为网络字节序 (大端)
+    uint32_t net_magic_num = htonl(magic_num);
+    uint32_t net_total_size = htonl(total_size);
     uint32_t net_header_size = htonl(header_size);
 
     std::string send_buf;
-    send_buf.append((const char *)&net_header_size, 4); // 写入Header长度
-    send_buf.append(header_str);                        // 接着写入Header内容
-    send_buf.append(args_str);                          // 最后写入Args内容
+    send_buf.append((const char *)&net_magic_num, 4);   // 1. 写入魔数
+    send_buf.append((const char *)&net_total_size, 4);  // 2. 写入总长度
+    send_buf.append((const char *)&net_header_size, 4); // 3. 写入Header长度
+    send_buf.append(header_str);                        // 4. 接着写入Header内容
+    send_buf.append(args_str);                          // 5. 最后写入Args内容
 
     // 4. 带自动剔除和负载均衡的重试机制
     int client_fd = -1;
     int max_retries = 3;
     bool rpc_success = false;
 
-    for (int i = 0; i < max_retries; ++i) {
+    for (int i = 1; i <= max_retries; ++i) {
         // 4.1 每次循环都重新获取地址 (触发轮询负载均衡算法)
         ServiceHost host = QueryZkForHost(service_name, method_name);
         if (host.ip.empty()) {
             LOG(WARNING) << "Retry " << i << ": Query ZK failed for " << service_name;
-            if (i == max_retries - 1) {  // 如果是最后一次循环了，才设置最终的失败状态
+            if (i == max_retries) {  // 如果是最后一次循环了，才设置最终的失败状态
                 controller->SetFailed("RPC Failed: Cannot find service providers in ZK after retries.");
                 return; // 彻底退出 RPC 调用
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds((i + 1) * 10));  // 还没到最后一次，睡一会儿再查，给 ZK 恢复的时间
+            std::this_thread::sleep_for(std::chrono::milliseconds(i * 10));  // 还没到最后一次，睡一会儿再查，给 ZK 恢复的时间
             continue;
         }
 
@@ -87,7 +99,7 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
             continue; // 重试下一台
         } else if (client_fd == -2) {  // 连接池已满：服务器健康，只是太忙了，不要剔除它。
             LOG(WARNING) << "Host is too busy (connection pool full): " << host.ip << ":" << host.port;
-            std::this_thread::sleep_for(std::chrono::milliseconds((i + 1) * 10)); // 睡一小会儿，给服务端喘息的时间，也给别的线程归还连接的时间
+            std::this_thread::sleep_for(std::chrono::milliseconds(i * 10)); // 睡一小会儿，给服务端喘息的时间，也给别的线程归还连接的时间
             continue; // 重试，轮询去尝试下一台机器
         }
 
@@ -99,28 +111,57 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
             return;
         }
 
-        // 服务端发回的格式是：[4字节 Length] + [Response Data]
-        uint32_t recv_size = 0;
-        if (net_utils::recv_exact(client_fd, (char *)&recv_size, 4) != 4) {  // 先精准读取前 4 个字节，获取响应总长度
+        // 6. 接收服务端发回的响应：[4字节 总长度] + [4字节 Header长度] + [RpcResponseHeader] + [Response Data]
+        // 注意：服务端响应为了保持高效，通常不需要加魔数，保持极简即可。
+        uint32_t recv_total_size = 0;
+        // 先精准读取前 4 个字节，获取后面的总长度
+        if (net_utils::recv_exact(client_fd, (char *)&recv_total_size, 4) != 4) {  
             ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
-            controller->SetFailed("Recv response header timeout or failed!");
+            controller->SetFailed("Recv response total_size timeout or failed!");
             return;
         }
 
-        recv_size = ntohl(recv_size);       // 转回主机字节序
-        if (recv_size > 64 * 1024 * 1024) { // 限制 RPC 响应最大为 64MB
+        recv_total_size = ntohl(recv_total_size);       // 转回主机字节序
+        if (recv_total_size > 64 * 1024 * 1024) {       // 限制 RPC 响应最大为 64MB
             ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
-            controller->SetFailed("Parse response header error: Response size too large!");
+            controller->SetFailed("Response size too large!");
             return;
         }
 
+        // 把剩下的整包数据全读出来
         std::string recv_buf;
-        recv_buf.resize(recv_size);
-        if (net_utils::recv_exact(client_fd, &recv_buf[0], recv_size) == recv_size) {
-            if (!response->ParseFromArray(&recv_buf[0], recv_size)) {   // 数据包错乱，安全起见销毁连接
-                controller->SetFailed("Parse response error!");
+        recv_buf.resize(recv_total_size);
+        if (net_utils::recv_exact(client_fd, &recv_buf[0], recv_total_size) == recv_total_size) {
+
+            // 步骤 A：提取 4 字节的 Header 长度
+            uint32_t header_size = ntohl(*(uint32_t*)(&recv_buf[0]));
+
+            // 步骤 B：反序列化 RpcResponseHeader (偏移量为 4，长度为 header_size)
+            myrpc::RpcResponseHeader resp_header;
+            if (!resp_header.ParseFromArray(&recv_buf[4], header_size)) {
+                controller->SetFailed("Parse RpcResponseHeader error!");
                 ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
-            } else {  // RPC 调用彻底成功，将健康的连接放回池中复用！
+                return;
+            }
+
+            // 步骤 C：检查框架级错误码
+            if (resp_header.errcode() != 0) {
+                // 如果 errcode != 0，说明业务逻辑根本没执行（比如服务没找到）
+                controller->SetFailed("RPC Framework Error: " + resp_header.errmsg());
+                // 注意：这里连接是健康的，只是逻辑报错，千万别销毁连接，放回连接池！
+                ConnectionPool::GetInstance().ReleaseConnection(host.ip, host.port, client_fd);
+                return; // 直接退出，不需要再解析 Response Data 了
+            }
+
+            // 步骤 D：如果框架层成功，再去反序列化真正的业务 Response
+            // 偏移量为 4 + header_size，剩余长度为 total_size - 4 - header_size
+            uint32_t data_size = recv_total_size - 4 - header_size;
+            if (!response->ParseFromArray(&recv_buf[4 + header_size], data_size)) {   
+                controller->SetFailed("Parse business response data error!");
+                // 业务数据错乱，安全起见销毁连接
+                ConnectionPool::GetInstance().CloseConnection(host.ip, host.port, client_fd);
+            } else {  
+                // RPC 调用彻底成功，将健康的连接放回池中复用！
                 rpc_success = true;
                 ConnectionPool::GetInstance().ReleaseConnection(host.ip, host.port, client_fd);
             }
@@ -135,17 +176,15 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
 
     // --- 退出重试循环后的兜底逻辑 ---
     if (!rpc_success) {
-        // 【分支 A：本地夭折】请求没有成功交发给网络层
-        // 1. 拦截隐性耗尽
+        //【分支 A：本地夭折】请求没有成功交发给网络层
+        // 拦截隐性耗尽
         if (!controller->Failed()) {  
-            controller->SetFailed("RPC Call failed: Exhausted all " + 
+            controller->SetFailed("RPC Call failed: Exhausted all " +
                                   std::to_string(max_retries) + " retries for " + service_name);
         }
-
-        // 2. 打印最终遗言
         LOG(ERROR) << "RPC Call aborted. Final error: " << controller->ErrorText();
 
-        // 3. 必须立刻调用 done，通知外层业务 RPC 失败了，别等了。
+        // 必须立刻调用 done，通知外层业务 RPC 失败了，别等了。
         if (done != nullptr) {
             done->Run();
         }
@@ -155,14 +194,10 @@ void MyRpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method
     }
 
     // 【分支 B：成功发送】
-    // 如果代码能走到这里，说明 rpc_success == true。
-    // 这意味着数据已经成功扔进了网络 socket。
-    // 此时绝对、绝对、绝对不能调用 done->Run()。
-    // 必须要等到 Muduo 的 OnMessage 收到服务器回包，并反序列化 response 成功后，
-    // 在 OnMessage 里面去调用 done->Run()。
-
-    // 所以这里直接结束 CallMethod 即可。
-    return;
+    // 如果代码能走到这里，说明 rpc_success == true，意味着 response 已经被成功解析赋值了！
+    if (done != nullptr) {
+        done->Run();
+    }
 }
 
 MyRpcChannel::ServiceHost MyRpcChannel::QueryZkForHost(const std::string &service_name, const std::string &method_name)
@@ -308,8 +343,10 @@ void MyRpcChannel::BackgroundRefreshCache(const std::string &path)
         // 继承旧的轮询计数器，保证负载均衡不断档
         if (auto it = host_cache.find(path); it != host_cache.end() && it->second) {
             new_list->next_idx.store(it->second->next_idx.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            it->second = new_list;
+        } else {
+            host_cache[path] = new_list;
         }
-        host_cache[path] = new_list;
     }
     LOG(INFO) << "Background refresh success for path: " << path << ", new node count: " << new_list->hosts.size();
 }

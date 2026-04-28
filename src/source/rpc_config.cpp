@@ -30,7 +30,7 @@ bool RpcConfig::LoadConfigFile(const std::string &fileName)
         Trim(key);
         Trim(value);
 
-        config_map[key] = value;
+        config_map.try_emplace(std::move(key), std::move(value));
     }
 
     return true;

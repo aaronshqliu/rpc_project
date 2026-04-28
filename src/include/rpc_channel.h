@@ -25,14 +25,9 @@ private:
         std::string ip;
         uint16_t port;
 
-        bool operator==(const ServiceHost &other) const
-        {
-            return ip == other.ip && port == other.port;
-        }
-
         bool operator!=(const ServiceHost &other) const
         {
-            return !(*this == other);
+            return ip != other.ip || port != other.port;
         }
     };
 

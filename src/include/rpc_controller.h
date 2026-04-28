@@ -25,8 +25,8 @@ public:
     void NotifyOnCancel(google::protobuf::Closure *callback) override;
 
 private:
-    bool failed;         // 标记 RPC 调用是否失败
-    std::string errText; // 存储失败的具体原因
+    bool failed;          // 标记 RPC 调用是否失败
+    std::string err_text; // 存储失败的具体原因
 };
 
 #endif
